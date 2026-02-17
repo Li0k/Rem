@@ -110,6 +110,8 @@ For the most important paths, propose 2–5 concrete “other directions” to c
 - Compatibility or rollout implications that reviewers may miss
 - Observability improvements that would reduce future debugging time
 
+If you truly have none, explicitly state `None identified` and explain why.
+
 Convert these into actionable **Risks**, **Suggestions**, and **Tests** (when they reduce risk).
 
 ### Language idioms & best practices (required)
@@ -135,6 +137,22 @@ If the change touches docs or implies docs should change:
 - Ensure accuracy: examples compile/run, commands are correct, links/paths exist, and the doc matches actual behavior.
 - Prefer updating existing docs over adding new docs unless clearly justified.
 
+### Stale tests & docs hygiene (required)
+
+Proactively check for unit tests and docs that no longer match reality. If a test/doc is outdated, either update it or remove it—do not keep misleading artifacts.
+
+Minimum scan:
+
+- Identify any renamed/removed public symbols, flags, config keys, endpoints, files, or CLI commands.
+- Search for stale references in likely locations (adjust to the repo): `docs/`, `README*`, `tests/`, `*_test.*`, `spec/`, `examples/`.
+  - Example: `rg -n "<identifier>" docs tests README* -S`
+- If you changed behavior, ensure tests/docs describe the new behavior and no longer assert the old behavior.
+
+Treat as:
+
+- **BLOCKER**: failing tests, or docs/tests that would clearly mislead users into broken usage.
+- **MAJOR**: significant doc/test drift that increases regression risk or hides breaking changes.
+
 ## 3) Verification (minimal, relevant)
 
 Prefer running the smallest relevant checks/tests for the touched area(s). Do not invent commands:
@@ -158,7 +176,9 @@ Use this exact structure. Include file path + line number when possible, or a mi
 - Verification: **Ran** `<commands>` (**pass/fail**) / **Not run** (recommended `<commands>`)
 
 ### Top findings (max 3)
-Numbered list. Each item must include:
+Numbered list. If there are no meaningful findings, write `None.` and do not invent issues.
+
+Each item must include:
 - Severity: **BLOCKER** / **MAJOR** / **MINOR**
 - Issue + why it matters
 - Evidence
@@ -168,7 +188,7 @@ Numbered list. Each item must include:
 Only BLOCKER items.
 
 ### Risks (important, non-blocking)
-Triggers + mitigations. Include at least **two alternative perspectives** (tradeoffs or other directions worth considering).
+Triggers + mitigations. Include at least **two alternative perspectives** (tradeoffs or other directions worth considering), or explicitly state that none were identified.
 
 ### Suggestions (non-blocking)
 High-leverage only (avoid noisy nits).
@@ -189,3 +209,4 @@ Only questions that unblock intent/diff alignment or risk assessment.
 - Do not modify code or open PRs unless explicitly asked; this task is review + feedback by default.
 - If you propose doc changes, write them in the repo’s doc style and as ready-to-merge human text (no “As an AI…”, no filler, no generic boilerplate).
 - If you propose code changes, keep them idiomatic for the language and consistent with repo conventions; avoid unusual APIs unless clearly justified and verified.
+- Avoid shifting goalposts: do not “manufacture” findings. In follow-up review passes, focus on verifying that previous findings were addressed and only add new items if new evidence emerges.
