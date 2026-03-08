@@ -5,24 +5,35 @@ metadata:
   short-description: High-signal code review (verifiable)
 ---
 
-# Code Review (Verifiable + Risk-Focused)
+# Code Review
 
-Review changes like an owning teammate. Produce *prioritized, actionable findings* grounded in evidence (diff + codebase context + command results when available).
+Review a single code change like a strict reviewer. Use `AGENTS.md` and the repo for project context; do not restate project background in the review.
 
-## 0) Pick a review target (ask if unclear)
+This skill is intentionally close to Codex's built-in review prompt. Keep it narrow: identify actionable issues introduced by the change, cite exact evidence, and avoid bloated report structure.
 
-Choose exactly one and state it explicitly:
+## Optional add-ons
 
-1. **Against a base branch (PR style)**: “What would merge into `<baseBranch>`?”
-2. **Uncommitted changes**: staged + unstaged + untracked changes in the working tree
-3. **A single commit**: review commit `<sha>`
-4. **Custom instructions**: follow user-provided review instructions verbatim
+Use the core flow by default. For larger diffs, follow-up reviews, or experimental multi-pass review runs, see [references/review-modes.md](references/review-modes.md).
 
-If the user does not specify, default to **Against a base branch** with `<baseBranch>=main`.
+When practical, prefer the bundled scripts for deterministic prep:
 
-Ask for any relevant **RFC/design doc** (link or file path). If none exists (or it’s unclear), ask for a 3–5 bullet “expected behavior & non-goals” summary so you can review against concrete acceptance criteria.
+- `scripts/review-collect-context.sh --base <branch>`
+- `scripts/review-collect-context.sh --commit <sha>`
+- `scripts/review-collect-context.sh --uncommitted`
+- `scripts/review-check-doc-drift.sh <identifier>...`
 
-## 1) Collect facts (commands-first)
+## 0) Scope
+
+Choose exactly one review target:
+
+1. **PR-style diff**: review `merge-base..HEAD` against `<baseBranch>`; default `<baseBranch>=main`
+2. **Working tree**: review staged + unstaged + untracked changes
+3. **Single commit**: review commit `<sha>`
+4. **Custom scope**: follow user-provided instructions exactly
+
+If the target is materially ambiguous, ask one short question. Otherwise proceed.
+
+## 1) Gather facts first
 
 Always start with:
 
@@ -30,183 +41,114 @@ Always start with:
 - `git diff --stat`
 - `git log --oneline --decorate -n 20`
 
-Then, depending on the target:
+Then inspect the actual change under review:
 
-### A) Against a base branch (PR style)
+- PR-style diff:
+  - `MB=$(git merge-base HEAD <baseBranch>)`
+  - `git diff $MB..HEAD`
+  - If needed: `git fetch -p` then retry with `<baseBranch>@{upstream}`
+- Working tree:
+  - `git diff --staged`
+  - `git diff`
+  - `git ls-files --others --exclude-standard`
+- Single commit:
+  - `git show <sha>`
 
-1) Determine merge base:
-
-- `MB=$(git merge-base HEAD <baseBranch>)`
-
-2) Inspect the merge diff:
-
-- `git diff $MB..HEAD`
-
-If `git merge-base` fails or the base branch is not local, try:
-
-- `git fetch -p`
-- `MB=$(git merge-base HEAD <baseBranch>@{upstream})`
-- `git diff $MB..HEAD`
-
-Optional (GitHub):
+Optional when available:
 
 - `gh pr view --json title,body,files,commits`
 - `gh pr diff`
 
-### B) Uncommitted changes
+If the bundled context script matches the target, prefer using it instead of retyping the same commands by hand.
 
-- `git diff --staged`
-- `git diff`
-- `git ls-files --others --exclude-standard` (untracked files list)
+## 2) What counts as a finding
 
-### C) A single commit
+Only flag issues the original author would likely fix if they knew about them.
 
-- `git show <sha>`
+A finding should satisfy all of the following:
 
-## 1.5) Confirm intent vs. reality (required)
+1. It meaningfully impacts correctness, performance, security, compatibility, or maintainability.
+2. It is discrete and actionable.
+3. It was introduced by the reviewed change, not pre-existing.
+4. It does not rely on unstated assumptions about intent or hidden behavior.
+5. If it affects another part of the codebase, you identify the specific caller, interface, or path that is provably affected.
+6. It is not better explained as an intentional behavior change.
 
-- State the intended behavior (from PR title/body, commit message, or user-provided intent).
-- State what the diff actually changes (behavior and interfaces).
-- Call out any mismatch (including scope creep, missing pieces, or surprising changes).
+If no issue clearly meets this bar, prefer outputting no findings.
 
-## 1.6) Spec / RFC alignment (required when a spec exists)
+## 3) How to write a finding
 
-If an RFC/design doc exists:
+Each finding should:
 
-- Extract key requirements, invariants, and acceptance criteria from the doc.
-- Check the implementation against them (including edge cases, error semantics, and compatibility promises).
-- Treat spec mismatches as **BLOCKER** unless the doc is explicitly being updated in the same change.
+- Explain why the issue matters
+- State the scenario or trigger when it is relevant
+- Cite exact file and line evidence
+- Keep the cited line range as tight as possible
+- Use one finding per distinct issue
+- Stay brief and matter-of-fact
 
-If no spec exists, treat the user’s “expected behavior & non-goals” bullets as the review baseline and call out any ambiguity.
+Do not report speculative issues. Do not invent problems to fill space.
 
-## 2) Review rubric (in priority order)
+## 4) What to prioritize
 
-Focus on the highest-risk paths first; only open additional files when needed to confirm a top finding.
+Prioritize:
 
-1. **Correctness**: edge cases, error/exception paths, nullability, concurrency/races, idempotency, resource lifecycle
-2. **Change risk**: breaking changes, behavior changes, migration/rollout/rollback complexity, compatibility (API/data/config)
-3. **Security**: input validation, injection, authz/authn, secrets/logging, unsafe deserialization
-4. **Performance**: hot paths, N+1, extra IO, accidental O(n²), cache invalidation, allocations
-5. **Maintainability**: naming, duplication, complexity, API design, documentation drift
-6. **Observability**: logs/metrics/traces, error reporting, debuggability, SLO-impacting blind spots
-7. **Tests**: missing coverage, weak assertions, flaky risk, missing negative/edge cases
+- Bugs and behavioral regressions
+- Compatibility and upgrade/downgrade risk
+- Concrete security and performance issues
+- Missing regression coverage for changed behavior
+- Stale tests, docs, examples, comments, or user-facing instructions that would mislead users or maintainers
 
-### Regression safety (required)
+Style, naming, and language-idiom findings are valid only when they:
 
-You cannot guarantee non-breakage, but you must proactively reduce regression risk:
+- Obscure behavior
+- Conflict with documented repo conventions or established language idioms
+- Leave stale or misleading tests/docs/examples/comments
+- Make the change materially harder to reason about or maintain
 
-- Identify existing behaviors/surfaces most likely impacted by the change.
-- Call out hidden coupling points (shared code paths, config defaults, serialization formats, public APIs).
-- Recommend (or run) targeted regression tests that cover the affected surfaces, especially previously supported “happy paths”.
-- If the change alters defaults, flags, config parsing, request/response schemas, or persistence formats, explicitly assess backwards compatibility and upgrade/downgrade behavior.
+Ignore trivial style, formatting, typos, and other nits.
 
-### Alternative perspectives (required)
+## 5) Search before ranking
 
-For the most important paths, propose 2–5 concrete “other directions” to consider, such as:
+Do not stop after the first few issues.
 
-- A simpler design or API shape that reduces complexity
-- An alternative implementation that is easier to test or reason about
-- Assumptions that should be made explicit (in code/docs/tests), and what happens if they don’t hold
-- Compatibility or rollout implications that reviewers may miss
-- Observability improvements that would reduce future debugging time
+First gather all qualifying candidate findings from the change. Then deduplicate and rank them.
 
-If you truly have none, explicitly state `None identified` and explain why.
+The search process is not limited to three findings, even if the final review is short.
 
-Convert these into actionable **Risks**, **Suggestions**, and **Tests** (when they reduce risk).
+## 6) Verification
 
-### Language idioms & best practices (required)
+When practical, run the smallest relevant checks you can discover from repo tooling.
 
-Ensure the change is idiomatic for the language(s) touched and consistent with existing repo conventions. Specifically:
+- Prefer targeted tests and linters for the touched area
+- If verification fails, report that before lower-priority nits
+- If you cannot run checks, say so briefly
 
-- Prefer established, idiomatic APIs over “clever” or unusual calls; if a call looks surprising, verify it in upstream docs and suggest a more standard approach.
-- Follow project patterns for errors, logging, configuration, naming, and module structure; avoid introducing a new style unless clearly justified.
-- When suggesting code, keep it minimal and idiomatic; avoid “AI-looking” abstractions or over-generalized helpers.
-- If the change introduces a new dependency or a new architectural pattern, validate that it matches the ecosystem and repo norms; call out simpler or more standard alternatives and ask for explicit justification when needed.
+## 7) Follow-up review
 
-Language-specific checks (apply when relevant):
+In a follow-up pass:
 
-- **Rust**: avoid `unwrap()`/`expect()` outside tests unless justified; prefer explicit error types/contexts; watch for unnecessary clones/allocations; use idiomatic iterators; consider `Send`/`Sync`, lifetimes/borrowing, and panic safety.
-- **Python**: avoid overly broad exceptions; use context managers for resources; prefer `pathlib`; keep async code correct (no blocking calls on event loops); follow typing conventions if the repo uses them.
+- First verify whether previous findings were actually addressed
+- New findings are allowed if they were introduced by the latest patch
+- New findings are also allowed if they were missed previously but are now supported by concrete evidence
 
-### Documentation quality (when applicable)
+Do not suppress real issues just to avoid shifting goalposts.
 
-If the change touches docs or implies docs should change:
+## 8) Output requirements
 
-- Match the repo’s existing documentation style and structure (headings, tense/voice, formatting, terminology).
-- Keep it human-readable and concise; avoid “AI-sounding” filler and generic phrasing.
-- Ensure accuracy: examples compile/run, commands are correct, links/paths exist, and the doc matches actual behavior.
-- Prefer updating existing docs over adding new docs unless clearly justified.
+Output format is flexible. Optimize for useful review comments, not template compliance.
 
-### Stale tests & docs hygiene (required)
+Minimum requirements:
 
-Proactively check for unit tests and docs that no longer match reality. If a test/doc is outdated, either update it or remove it—do not keep misleading artifacts.
+- Put findings first
+- Include exact file and line evidence
+- Keep any summary short
+- If there are no meaningful findings, say `None.`
 
-Minimum scan:
+## 9) Hard rules
 
-- Identify any renamed/removed public symbols, flags, config keys, endpoints, files, or CLI commands.
-- Search for stale references in likely locations (adjust to the repo): `docs/`, `README*`, `tests/`, `*_test.*`, `spec/`, `examples/`.
-  - Example: `rg -n "<identifier>" docs tests README* -S`
-- If you changed behavior, ensure tests/docs describe the new behavior and no longer assert the old behavior.
-
-Treat as:
-
-- **BLOCKER**: failing tests, or docs/tests that would clearly mislead users into broken usage.
-- **MAJOR**: significant doc/test drift that increases regression risk or hides breaking changes.
-
-## 3) Verification (minimal, relevant)
-
-Prefer running the smallest relevant checks/tests for the touched area(s). Do not invent commands:
-
-- Discover test/lint commands from the repo (e.g., `package.json`, `Makefile`, `justfile`, `Cargo.toml`, `pyproject.toml`, CI configs).
-- If formatters/linters are configured for the touched language(s), prefer running them (e.g., Rust: `cargo fmt`, `cargo clippy`; Python: `ruff`, `black`, `mypy`) *when present in the repo/tooling*.
-- If you can’t run commands, provide explicit commands the author should run and what “success” looks like.
-
-If verification fails, report the failure succinctly and stop digging into nits until the failure is understood.
-
-## 4) Output format (strict)
-
-Use this exact structure. Include file path + line number when possible, or a minimal searchable snippet.
-
-### Summary
-- Intent (1 line)
-- What changed (1–2 lines)
-- Verdict: **Approve** / **Request changes** / **Comment**
-- Spec/RFC alignment: **OK** / **Mismatch** / **Not provided**
-- Regression risk: **Low** / **Medium** / **High** (brief evidence)
-- Verification: **Ran** `<commands>` (**pass/fail**) / **Not run** (recommended `<commands>`)
-
-### Top findings (max 3)
-Numbered list. If there are no meaningful findings, write `None.` and do not invent issues.
-
-Each item must include:
-- Severity: **BLOCKER** / **MAJOR** / **MINOR**
-- Issue + why it matters
-- Evidence
-- Suggested fix (concrete)
-
-### Must-fix (blocking)
-Only BLOCKER items.
-
-### Risks (important, non-blocking)
-Triggers + mitigations. Include at least **two alternative perspectives** (tradeoffs or other directions worth considering), or explicitly state that none were identified.
-
-### Suggestions (non-blocking)
-High-leverage only (avoid noisy nits).
-
-### Tests / Verification
-- Commands executed + results
-- Recommended commands (if not executed) + rationale
-- Manual verification steps (if applicable)
-- Add targeted test ideas (including edge/negative cases) when they reduce risk.
-
-### Questions
-Only questions that unblock intent/diff alignment or risk assessment.
-
-## 5) Hard rules
-
-- Do not propose large refactors unless clearly justified by risk.
-- Do not assume unspecified requirements; state assumptions and ask clarifying questions.
-- Do not modify code or open PRs unless explicitly asked; this task is review + feedback by default.
-- If you propose doc changes, write them in the repo’s doc style and as ready-to-merge human text (no “As an AI…”, no filler, no generic boilerplate).
-- If you propose code changes, keep them idiomatic for the language and consistent with repo conventions; avoid unusual APIs unless clearly justified and verified.
-- Avoid shifting goalposts: do not “manufacture” findings. In follow-up review passes, focus on verifying that previous findings were addressed and only add new items if new evidence emerges.
+- Do not guess line numbers
+- Prefer the smallest line range that pinpoints the issue
+- Prefer bugs, regressions, and stale tests/docs over style nits
+- Do not propose large refactors unless the risk clearly justifies them
+- Do not modify code or open PRs unless explicitly asked
