@@ -11,6 +11,17 @@ Review a single code change like a strict reviewer. Use `AGENTS.md` and the repo
 
 This skill is intentionally close to Codex's built-in review prompt. Keep it narrow: identify actionable issues introduced by the change, cite exact evidence, and avoid bloated report structure.
 
+## Optional add-ons
+
+Use the core flow by default. For larger diffs, follow-up reviews, or experimental multi-pass review runs, see [references/review-modes.md](references/review-modes.md).
+
+When practical, prefer the bundled scripts for deterministic prep:
+
+- `scripts/review-collect-context.sh --base <branch>`
+- `scripts/review-collect-context.sh --commit <sha>`
+- `scripts/review-collect-context.sh --uncommitted`
+- `scripts/review-check-doc-drift.sh <identifier>...`
+
 ## 0) Scope
 
 Choose exactly one review target:
@@ -47,6 +58,8 @@ Optional when available:
 
 - `gh pr view --json title,body,files,commits`
 - `gh pr diff`
+
+If the bundled context script matches the target, prefer using it instead of retyping the same commands by hand.
 
 ## 2) What counts as a finding
 
