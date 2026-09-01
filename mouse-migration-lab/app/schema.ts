@@ -39,6 +39,28 @@ export type Metrics = {
   severeThreshold: number;
 };
 
+export type InputDiagnosticsSnapshot = {
+  backend: string;
+  native: boolean;
+  unadjusted: boolean;
+  fallbackReason: string | null;
+  registered: boolean;
+  capacity: number;
+  packetCount: number;
+  eventCount: number;
+  movementPackets: number;
+  buttonEvents: number;
+  deviceCount: number;
+  peakPending: number;
+  currentPending: number;
+  dropped: number;
+  firstPacketMs: number | null;
+  lastPacketMs: number | null;
+  firstEventMs: number | null;
+  lastEventMs: number | null;
+  packetHz: number | null;
+};
+
 export type RunData = {
   schema: typeof RUN_SCHEMA;
   app: 'mouse-migration-lab';
@@ -64,6 +86,7 @@ export type RunData = {
       native: boolean;
       unadjusted: boolean;
       dropped?: number;
+      diagnostics?: InputDiagnosticsSnapshot;
     };
     device?: DeviceProfileSnapshot;
   };
@@ -120,10 +143,91 @@ export function parseRun(value: unknown): RunData | null {
   const inputBackend = settings?.inputBackend as
     | Record<string, unknown>
     | undefined;
+  const inputDiagnostics = inputBackend?.diagnostics as
+    | Record<string, unknown>
+    | undefined;
   const device = settings?.device as Record<string, unknown> | undefined;
   const elapsedMs = v.elapsedMs as number;
   const finiteArray = (items: unknown, max: number) =>
     Array.isArray(items) && items.length <= max && items.every(finite);
+  const nonNegativeInteger = (value: unknown) =>
+    finite(value) && Number.isSafeInteger(value) && (value as number) >= 0;
+  const nullableNonNegative = (value: unknown) =>
+    value === null || (finite(value) && (value as number) >= 0);
+  const validDiagnostics =
+    inputDiagnostics === undefined ||
+    (typeof inputDiagnostics.backend === 'string' &&
+      inputDiagnostics.backend.length > 0 &&
+      inputDiagnostics.backend.length <= 128 &&
+      typeof inputDiagnostics.native === 'boolean' &&
+      typeof inputDiagnostics.unadjusted === 'boolean' &&
+      (inputDiagnostics.fallbackReason === null ||
+        (typeof inputDiagnostics.fallbackReason === 'string' &&
+          inputDiagnostics.fallbackReason.length > 0 &&
+          inputDiagnostics.fallbackReason.length <= 512)) &&
+      typeof inputDiagnostics.registered === 'boolean' &&
+      [
+        'capacity',
+        'packetCount',
+        'eventCount',
+        'movementPackets',
+        'buttonEvents',
+        'deviceCount',
+        'peakPending',
+        'currentPending',
+        'dropped',
+      ].every((key) => nonNegativeInteger(inputDiagnostics[key])) &&
+      ['firstPacketMs', 'lastPacketMs', 'firstEventMs', 'lastEventMs'].every(
+        (key) => nullableNonNegative(inputDiagnostics[key]),
+      ) &&
+      (inputDiagnostics.packetHz === null ||
+        (finite(inputDiagnostics.packetHz) &&
+          (inputDiagnostics.packetHz as number) >= 0 &&
+          (inputDiagnostics.packetHz as number) <= 100_000)) &&
+      (inputDiagnostics.deviceCount as number) <=
+        (inputDiagnostics.packetCount as number) &&
+      (inputDiagnostics.movementPackets as number) <=
+        (inputDiagnostics.packetCount as number) &&
+      (inputDiagnostics.eventCount as number) +
+        (inputDiagnostics.dropped as number) ===
+        (inputDiagnostics.movementPackets as number) +
+          (inputDiagnostics.buttonEvents as number) &&
+      (inputDiagnostics.currentPending as number) <=
+        (inputDiagnostics.peakPending as number) &&
+      ((inputDiagnostics.capacity as number) === 0 ||
+        (inputDiagnostics.peakPending as number) <=
+          (inputDiagnostics.capacity as number)) &&
+      (inputDiagnostics.capacity as number) <= 1_000_000 &&
+      ((inputDiagnostics.packetCount as number) === 0
+        ? inputDiagnostics.firstPacketMs === null
+        : inputDiagnostics.firstPacketMs !== null) &&
+      ((inputDiagnostics.eventCount as number) +
+        (inputDiagnostics.dropped as number) ===
+      0
+        ? inputDiagnostics.firstEventMs === null
+        : inputDiagnostics.firstEventMs !== null) &&
+      (inputDiagnostics.firstPacketMs === null) ===
+        (inputDiagnostics.lastPacketMs === null) &&
+      (inputDiagnostics.firstEventMs === null) ===
+        (inputDiagnostics.lastEventMs === null) &&
+      (inputDiagnostics.firstPacketMs === null ||
+        (inputDiagnostics.firstPacketMs as number) <=
+          (inputDiagnostics.lastPacketMs as number)) &&
+      (inputDiagnostics.firstEventMs === null ||
+        (inputDiagnostics.firstEventMs as number) <=
+          (inputDiagnostics.lastEventMs as number)) &&
+      (!inputBackend ||
+        (inputDiagnostics.backend === inputBackend.id &&
+          inputDiagnostics.native === inputBackend.native &&
+          inputDiagnostics.unadjusted === inputBackend.unadjusted &&
+          (inputBackend.dropped === undefined ||
+            inputDiagnostics.dropped === inputBackend.dropped))) &&
+      (inputDiagnostics.native
+        ? inputDiagnostics.registered === true &&
+          (inputDiagnostics.capacity as number) > 0 &&
+          inputDiagnostics.fallbackReason === null
+        : inputDiagnostics.registered === false &&
+          (inputDiagnostics.capacity as number) === 0));
   if (
     v.schema !== RUN_SCHEMA ||
     v.app !== 'mouse-migration-lab' ||
@@ -179,7 +283,8 @@ export function parseRun(value: unknown): RunData | null {
         (inputBackend.dropped !== undefined &&
           (!finite(inputBackend.dropped) ||
             (inputBackend.dropped as number) < 0 ||
-            !Number.isInteger(inputBackend.dropped))))) ||
+            !Number.isInteger(inputBackend.dropped))) ||
+        !validDiagnostics)) ||
     (device !== undefined &&
       (!device ||
         typeof device.id !== 'string' ||

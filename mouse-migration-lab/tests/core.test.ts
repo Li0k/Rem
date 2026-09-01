@@ -243,5 +243,53 @@ describe('replay primitives', () => {
       pollingRate: 1000,
     };
     expect(parseRun(invalidDevice)).toBeNull();
+
+    const legacyBackend = validRun();
+    (legacyBackend.settings as Record<string, unknown>).inputBackend = {
+      id: 'browser-pointer-lock',
+      native: false,
+      unadjusted: true,
+      dropped: 0,
+    };
+    expect(parseRun(legacyBackend)).not.toBeNull();
+
+    const diagnosed = validRun();
+    (diagnosed.settings as Record<string, unknown>).inputBackend = {
+      id: 'windows-wm-input',
+      native: true,
+      unadjusted: true,
+      dropped: 0,
+      diagnostics: {
+        backend: 'windows-wm-input',
+        native: true,
+        unadjusted: true,
+        fallbackReason: null,
+        registered: true,
+        capacity: 16_384,
+        packetCount: 12,
+        eventCount: 10,
+        movementPackets: 9,
+        buttonEvents: 1,
+        deviceCount: 1,
+        peakPending: 4,
+        currentPending: 0,
+        dropped: 0,
+        firstPacketMs: 1,
+        lastPacketMs: 12,
+        firstEventMs: 1,
+        lastEventMs: 11,
+        packetHz: 1000,
+      },
+    };
+    expect(parseRun(diagnosed)).not.toBeNull();
+    (
+      (
+        (diagnosed.settings as Record<string, unknown>).inputBackend as Record<
+          string,
+          unknown
+        >
+      ).diagnostics as Record<string, unknown>
+    ).currentPending = 5;
+    expect(parseRun(diagnosed)).toBeNull();
   });
 });

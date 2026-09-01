@@ -4,7 +4,7 @@ use serde::Serialize;
 #[cfg(windows)]
 use std::time::Instant;
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -27,6 +27,16 @@ struct EventQueue {
     events: VecDeque<NativeInputEvent>,
     capacity: usize,
     dropped: u64,
+    raw_packets: u64,
+    emitted_events: u64,
+    movement_packets: u64,
+    button_events: u64,
+    peak_pending: usize,
+    devices: HashSet<usize>,
+    first_packet_ms: Option<f64>,
+    last_packet_ms: Option<f64>,
+    first_event_ms: Option<f64>,
+    last_event_ms: Option<f64>,
 }
 
 impl EventQueue {
@@ -36,15 +46,49 @@ impl EventQueue {
             events: VecDeque::with_capacity(capacity),
             capacity,
             dropped: 0,
+            raw_packets: 0,
+            emitted_events: 0,
+            movement_packets: 0,
+            button_events: 0,
+            peak_pending: 0,
+            devices: HashSet::with_capacity(8),
+            first_packet_ms: None,
+            last_packet_ms: None,
+            first_event_ms: None,
+            last_event_ms: None,
+        }
+    }
+
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    fn record_raw_packet(&mut self, t: f64, device: Option<usize>) {
+        self.raw_packets = self.raw_packets.saturating_add(1);
+        self.first_packet_ms.get_or_insert(t);
+        self.last_packet_ms = Some(t);
+        if let Some(device) = device.filter(|device| *device != 0) {
+            self.devices.insert(device);
         }
     }
 
     #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     fn push(&mut self, event: NativeInputEvent) {
+        let t = match &event {
+            NativeInputEvent::Move { t, .. } => {
+                self.movement_packets = self.movement_packets.saturating_add(1);
+                *t
+            }
+            NativeInputEvent::ButtonDown { t, .. } | NativeInputEvent::ButtonUp { t, .. } => {
+                self.button_events = self.button_events.saturating_add(1);
+                *t
+            }
+        };
+        self.first_event_ms.get_or_insert(t);
+        self.last_event_ms = Some(t);
         if self.events.len() == self.capacity {
             self.dropped = self.dropped.saturating_add(1);
         } else {
             self.events.push_back(event);
+            self.emitted_events = self.emitted_events.saturating_add(1);
+            self.peak_pending = self.peak_pending.max(self.events.len());
         }
     }
 
@@ -53,18 +97,51 @@ impl EventQueue {
         let events = self.events.drain(..count).collect();
         NativeInputBatch {
             events,
-            dropped: self.dropped,
-            pending: self.events.len(),
+            diagnostics: self.diagnostics(),
         }
     }
+
+    fn diagnostics(&self) -> NativeInputDiagnostics {
+        NativeInputDiagnostics {
+            raw_packets: self.raw_packets,
+            emitted_events: self.emitted_events,
+            movement_packets: self.movement_packets,
+            button_events: self.button_events,
+            device_count: self.devices.len(),
+            peak_pending: self.peak_pending,
+            pending: self.events.len(),
+            dropped: self.dropped,
+            first_packet_ms: self.first_packet_ms,
+            last_packet_ms: self.last_packet_ms,
+            first_event_ms: self.first_event_ms,
+            last_event_ms: self.last_event_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeInputDiagnostics {
+    raw_packets: u64,
+    emitted_events: u64,
+    movement_packets: u64,
+    button_events: u64,
+    device_count: usize,
+    peak_pending: usize,
+    pending: usize,
+    dropped: u64,
+    first_packet_ms: Option<f64>,
+    last_packet_ms: Option<f64>,
+    first_event_ms: Option<f64>,
+    last_event_ms: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NativeInputBatch {
     events: Vec<NativeInputEvent>,
-    dropped: u64,
-    pending: usize,
+    #[serde(flatten)]
+    diagnostics: NativeInputDiagnostics,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +152,7 @@ struct NativeInputStart {
     unadjusted: bool,
     capacity: usize,
     epoch_elapsed_ms: f64,
+    registered: bool,
 }
 
 #[derive(Default)]
@@ -155,17 +233,19 @@ mod windows_input {
         if raw.header.dwType != RIM_TYPEMOUSE {
             return;
         }
+        let device = (!raw.header.hDevice.is_null()).then_some(raw.header.hDevice as usize);
         let mouse = unsafe { raw.data.mouse };
+        let t = context.epoch.elapsed().as_secs_f64() * 1_000.0;
+        let Ok(mut queue) = context.queue.lock() else {
+            return;
+        };
+        queue.record_raw_packet(t, device);
         // Absolute packets (for example some remote-desktop or tablet paths)
         // are not relative mouse counts and must not be mixed into this backend.
         if mouse.usFlags & MOUSE_MOVE_ABSOLUTE != 0 {
             return;
         }
-        let t = context.epoch.elapsed().as_secs_f64() * 1_000.0;
         let button_flags = unsafe { mouse.Anonymous.Anonymous.usButtonFlags } as u32;
-        let Ok(mut queue) = context.queue.lock() else {
-            return;
-        };
         if mouse.lLastX != 0 || mouse.lLastY != 0 {
             queue.push(NativeInputEvent::Move {
                 t,
@@ -313,6 +393,7 @@ fn start_native_input(
         unadjusted: true,
         capacity: INPUT_QUEUE_CAPACITY,
         epoch_elapsed_ms,
+        registered: true,
     })
 }
 
@@ -341,7 +422,9 @@ fn drain_native_input(
 
 #[cfg(windows)]
 #[tauri::command]
-fn stop_native_input(state: tauri::State<'_, NativeInputManager>) -> Result<(), String> {
+fn stop_native_input(
+    state: tauri::State<'_, NativeInputManager>,
+) -> Result<NativeInputBatch, String> {
     let hook = state
         .hook
         .lock()
@@ -350,23 +433,23 @@ fn stop_native_input(state: tauri::State<'_, NativeInputManager>) -> Result<(), 
     if let Some(hook) = hook {
         windows_input::uninstall(hook);
     }
-    state
+    let queue = state
         .queue
         .lock()
         .map_err(|_| "native input state poisoned")?
-        .take();
-    Ok(())
+        .take()
+        .ok_or("native input is not active")?;
+    let mut queue = queue.lock().map_err(|_| "native input queue poisoned")?;
+    let remaining = queue.events.len();
+    Ok(queue.drain(remaining))
 }
 
 #[cfg(not(windows))]
 #[tauri::command]
-fn stop_native_input(state: tauri::State<'_, NativeInputManager>) -> Result<(), String> {
-    state
-        .queue
-        .lock()
-        .map_err(|_| "native input state poisoned")?
-        .take();
-    Ok(())
+fn stop_native_input(
+    _state: tauri::State<'_, NativeInputManager>,
+) -> Result<NativeInputBatch, String> {
+    Err("WM_INPUT is only available on Windows".into())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -398,8 +481,10 @@ mod tests {
         queue.push(NativeInputEvent::ButtonUp { t: 3.0, button: 0 });
 
         let batch = queue.drain(8);
-        assert_eq!(batch.dropped, 1);
-        assert_eq!(batch.pending, 0);
+        assert_eq!(batch.diagnostics.dropped, 1);
+        assert_eq!(batch.diagnostics.pending, 0);
+        assert_eq!(batch.diagnostics.emitted_events, 2);
+        assert_eq!(batch.diagnostics.peak_pending, 2);
         assert_eq!(batch.events.len(), 2);
         assert_eq!(
             batch.events[0],
@@ -427,9 +512,36 @@ mod tests {
         }
         let first = queue.drain(2);
         assert_eq!(first.events.len(), 2);
-        assert_eq!(first.pending, 1);
+        assert_eq!(first.diagnostics.pending, 1);
         let second = queue.drain(2);
         assert_eq!(second.events.len(), 1);
-        assert_eq!(second.dropped, 0);
+        assert_eq!(second.diagnostics.dropped, 0);
+    }
+
+    #[test]
+    fn diagnostics_count_packets_events_peak_and_distinct_non_null_devices() {
+        let mut queue = EventQueue::with_capacity(4);
+        queue.record_raw_packet(1.0, Some(0x111));
+        queue.push(NativeInputEvent::Move {
+            t: 1.0,
+            dx: 4,
+            dy: -2,
+        });
+        queue.record_raw_packet(2.0, Some(0x111));
+        queue.push(NativeInputEvent::ButtonDown { t: 2.0, button: 0 });
+        queue.record_raw_packet(3.0, Some(0x222));
+        queue.record_raw_packet(4.0, None);
+
+        let diagnostics = queue.diagnostics();
+        assert_eq!(diagnostics.raw_packets, 4);
+        assert_eq!(diagnostics.emitted_events, 2);
+        assert_eq!(diagnostics.movement_packets, 1);
+        assert_eq!(diagnostics.button_events, 1);
+        assert_eq!(diagnostics.device_count, 2);
+        assert_eq!(diagnostics.peak_pending, 2);
+        assert_eq!(diagnostics.first_packet_ms, Some(1.0));
+        assert_eq!(diagnostics.last_packet_ms, Some(4.0));
+        assert_eq!(diagnostics.first_event_ms, Some(1.0));
+        assert_eq!(diagnostics.last_event_ms, Some(2.0));
     }
 }

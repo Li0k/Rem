@@ -34,6 +34,9 @@ export type EvidenceQuality = {
   trackingEffectiveMs: number;
   inputEvents: number;
   inputDropped: number;
+  nativePackets: number;
+  inputDeviceCount: number;
+  nativeInput: boolean;
   frameSamples: number;
   severeRatio: number;
   longTasks: number;
@@ -89,7 +92,14 @@ export function assessRun(run: RunData): EvidenceQuality {
       ? Math.max(0, run.metrics.hits) + Math.max(0, run.metrics.misses)
       : 0;
   const inputEvents = run.movement.t.length;
-  const inputDropped = run.settings.inputBackend?.dropped ?? 0;
+  const inputDiagnostics = run.settings.inputBackend?.diagnostics;
+  const nativeInput = run.settings.inputBackend?.native ?? false;
+  const inputDropped =
+    inputDiagnostics?.dropped ?? run.settings.inputBackend?.dropped ?? 0;
+  const nativePackets = inputDiagnostics?.packetCount ?? 0;
+  const nativeMovements = inputDiagnostics?.movementPackets ?? 0;
+  const inputDeviceCount = inputDiagnostics?.deviceCount ?? 0;
+  const inputPending = inputDiagnostics?.currentPending ?? 0;
   const frameSamples = run.frames.length;
   const severeRatio = run.metrics.severeRatio;
   const longTasks = run.metrics.longTasks;
@@ -101,8 +111,24 @@ export function assessRun(run: RunData): EvidenceQuality {
     hardInvalid.push('没有可验证的输入事件');
   if (!Number.isInteger(inputDropped) || inputDropped < 0)
     hardInvalid.push('原始输入丢包指标无效');
-  else if (inputDropped > 0)
+  else if (run.settings.inputBackend?.native && inputDropped > 0)
     hardInvalid.push(`原始输入缓冲丢失 ${inputDropped} 个事件`);
+  if (run.settings.inputBackend?.native && nativePackets === 0)
+    hardInvalid.push('WM_INPUT 未收到原始数据包');
+  else if (run.settings.inputBackend?.native && nativeMovements === 0)
+    hardInvalid.push('WM_INPUT 未收到鼠标移动数据');
+  if (run.settings.inputBackend?.native && inputPending > 0)
+    hardInvalid.push(`WM_INPUT 结束时仍有 ${inputPending} 个事件未处理`);
+  if (
+    run.settings.inputBackend?.native &&
+    nativePackets > 0 &&
+    inputDeviceCount === 0
+  )
+    hardInvalid.push('WM_INPUT 无法归因到物理鼠标设备');
+  if (run.settings.inputBackend?.native && inputDeviceCount > 1)
+    warnings.push(
+      `检测到 ${inputDeviceCount} 个鼠标设备，聚合输入会污染设备归因`,
+    );
   if (frameSamples < ASSESSMENT_THRESHOLDS.minFrameSamples)
     hardInvalid.push('没有可验证的帧样本');
 
@@ -158,6 +184,9 @@ export function assessRun(run: RunData): EvidenceQuality {
     trackingEffectiveMs,
     inputEvents,
     inputDropped,
+    nativePackets,
+    inputDeviceCount,
+    nativeInput,
     frameSamples,
     severeRatio,
     longTasks,

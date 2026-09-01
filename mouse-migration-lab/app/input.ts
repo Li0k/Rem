@@ -12,8 +12,31 @@ export type InputSession = {
   label: string;
   native: boolean;
   unadjusted: boolean;
-  dropped: () => number;
+  diagnostics: () => InputDiagnostics;
+  finish: () => Promise<InputDiagnostics>;
   release: () => void;
+};
+
+export type InputDiagnostics = {
+  backend: string;
+  native: boolean;
+  unadjusted: boolean;
+  fallbackReason: string | null;
+  registered: boolean;
+  capacity: number;
+  packetCount: number;
+  eventCount: number;
+  movementPackets: number;
+  buttonEvents: number;
+  deviceCount: number;
+  peakPending: number;
+  currentPending: number;
+  dropped: number;
+  firstPacketMs: number | null;
+  lastPacketMs: number | null;
+  firstEventMs: number | null;
+  lastEventMs: number | null;
+  packetHz: number | null;
 };
 
 export type InputBackend = {
@@ -33,8 +56,18 @@ type NativeEvent =
 
 type NativeBatch = {
   events: NativeEvent[];
+  rawPackets: number;
+  emittedEvents: number;
+  movementPackets: number;
+  buttonEvents: number;
+  deviceCount: number;
+  peakPending: number;
   dropped: number;
   pending: number;
+  firstPacketMs: number | null;
+  lastPacketMs: number | null;
+  firstEventMs: number | null;
+  lastEventMs: number | null;
 };
 
 type NativeStart = {
@@ -43,7 +76,23 @@ type NativeStart = {
   unadjusted: boolean;
   capacity: number;
   epochElapsedMs: number;
+  registered: boolean;
 };
+
+const packetRate = (
+  count: number,
+  first: number | null,
+  last: number | null,
+) =>
+  count > 1 && first !== null && last !== null && last > first
+    ? ((count - 1) * 1000) / (last - first)
+    : null;
+
+export const nativeFallbackReason = (error: unknown) =>
+  `native-start-failed: ${error instanceof Error ? error.message : String(error)}`.slice(
+    0,
+    512,
+  );
 
 const lockPointer = async (canvas: HTMLCanvasElement) => {
   if (document.pointerLockElement === canvas) return true;
@@ -64,18 +113,36 @@ const createBrowserSession = (
   canvas: HTMLCanvasElement,
   handlers: InputHandlers,
   unadjusted: boolean,
+  fallbackReason = 'not-applicable',
 ): InputSession => {
   let released = false;
+  const epoch = performance.now();
+  let packetCount = 0;
+  let movementPackets = 0;
+  let buttonEvents = 0;
+  let firstEventMs: number | null = null;
+  let lastEventMs: number | null = null;
+  const record = (timestamp: number, movement: boolean) => {
+    const relativeTimestamp = Math.max(0, timestamp - epoch);
+    packetCount += 1;
+    if (movement) movementPackets += 1;
+    else buttonEvents += 1;
+    firstEventMs ??= relativeTimestamp;
+    lastEventMs = relativeTimestamp;
+  };
   const onMove = (event: MouseEvent) => {
     if (document.pointerLockElement !== canvas) return;
+    record(event.timeStamp, true);
     handlers.move(event.movementX, event.movementY, event.timeStamp);
   };
   const onDown = (event: MouseEvent) => {
     if (document.pointerLockElement !== canvas) return;
+    record(event.timeStamp, false);
     handlers.buttonDown(event.button, event.timeStamp);
   };
   const onUp = (event: MouseEvent) => {
     if (document.pointerLockElement !== canvas) return;
+    record(event.timeStamp, false);
     handlers.buttonUp(event.button, event.timeStamp);
   };
   const onLock = () => {
@@ -92,18 +159,46 @@ const createBrowserSession = (
   document.addEventListener('mouseup', onUp);
   document.addEventListener('pointerlockchange', onLock);
 
+  const diagnostics = (): InputDiagnostics => ({
+    backend: 'browser-pointer-lock',
+    native: false,
+    unadjusted,
+    fallbackReason,
+    registered: false,
+    capacity: 0,
+    packetCount,
+    eventCount: packetCount,
+    movementPackets,
+    buttonEvents,
+    deviceCount: 0,
+    peakPending: 0,
+    currentPending: 0,
+    dropped: 0,
+    firstPacketMs: firstEventMs,
+    lastPacketMs: lastEventMs,
+    firstEventMs,
+    lastEventMs,
+    packetHz: packetRate(packetCount, firstEventMs, lastEventMs),
+  });
+  const release = () => {
+    if (released) return;
+    released = true;
+    removeListeners();
+    if (document.pointerLockElement === canvas) document.exitPointerLock();
+  };
+
   return {
     id: 'browser-pointer-lock',
     label: 'browser-pointer-lock',
     native: false,
     unadjusted,
-    dropped: () => 0,
-    release() {
-      if (released) return;
-      released = true;
-      removeListeners();
-      if (document.pointerLockElement === canvas) document.exitPointerLock();
+    diagnostics,
+    async finish() {
+      const final = diagnostics();
+      release();
+      return final;
     },
+    release,
   };
 };
 
@@ -125,8 +220,24 @@ export const WINDOWS_NATIVE_INPUT_BACKEND: InputBackend = {
   native: true,
   async acquire(canvas, handlers) {
     let released = false;
+    let finishing = false;
     let raf = 0;
-    let dropped = 0;
+    let pumpTask: Promise<void> | null = null;
+    let latest: NativeBatch = {
+      events: [],
+      rawPackets: 0,
+      emittedEvents: 0,
+      movementPackets: 0,
+      buttonEvents: 0,
+      deviceCount: 0,
+      peakPending: 0,
+      dropped: 0,
+      pending: 0,
+      firstPacketMs: null,
+      lastPacketMs: null,
+      firstEventMs: null,
+      lastEventMs: null,
+    };
     const pointerLocked = await lockPointer(canvas);
     if (pointerLocked === null) return null;
 
@@ -134,10 +245,15 @@ export const WINDOWS_NATIVE_INPUT_BACKEND: InputBackend = {
     const requestAt = performance.now();
     try {
       started = await invoke<NativeStart>('start_native_input');
-    } catch {
+    } catch (error) {
       // Keep the already-acquired lock and its real unadjusted status so the
       // fallback does not need a second user gesture or mislabel adjusted input.
-      return createBrowserSession(canvas, handlers, pointerLocked);
+      return createBrowserSession(
+        canvas,
+        handlers,
+        pointerLocked,
+        nativeFallbackReason(error),
+      );
     }
     // Align Rust Instant-relative timestamps to the browser performance clock.
     // The response carries time already elapsed since native registration so
@@ -149,35 +265,73 @@ export const WINDOWS_NATIVE_INPUT_BACKEND: InputBackend = {
     };
     document.addEventListener('pointerlockchange', onLock);
 
-    const pump = async () => {
-      if (released) return;
-      let pending = 0;
-      try {
-        // One IPC call drains many raw packets. At common 1-8 kHz polling
-        // rates a 1024-event batch comfortably spans one display frame.
-        const batch = await invoke<NativeBatch>('drain_native_input', {
-          limit: 1024,
-        });
-        dropped = batch.dropped;
-        pending = batch.pending;
-        for (const event of batch.events) {
-          const timestamp = clockOrigin + event.t;
-          if (event.kind === 'move')
-            handlers.move(event.dx, event.dy, timestamp);
-          else if (event.kind === 'button_down')
-            handlers.buttonDown(event.button, timestamp);
-          else handlers.buttonUp(event.button, timestamp);
-        }
-      } catch {
-        if (!released) handlers.lost();
-        return;
-      }
-      if (!released) {
-        if (pending > 0) queueMicrotask(() => void pump());
-        else raf = requestAnimationFrame(pump);
+    const applyBatch = (batch: NativeBatch) => {
+      latest = batch;
+      for (const event of batch.events) {
+        const timestamp = clockOrigin + event.t;
+        if (event.kind === 'move') handlers.move(event.dx, event.dy, timestamp);
+        else if (event.kind === 'button_down')
+          handlers.buttonDown(event.button, timestamp);
+        else handlers.buttonUp(event.button, timestamp);
       }
     };
-    void pump();
+    const pump = () => {
+      if (released || finishing) return;
+      let pending = 0;
+      const task = (async () => {
+        try {
+          // One IPC call drains many raw packets. At common 1-8 kHz polling
+          // rates a 1024-event batch comfortably spans one display frame.
+          const batch = await invoke<NativeBatch>('drain_native_input', {
+            limit: 1024,
+          });
+          applyBatch(batch);
+          pending = batch.pending;
+        } catch {
+          if (!released && !finishing) handlers.lost();
+        }
+      })();
+      pumpTask = task;
+      void task.finally(() => {
+        if (pumpTask === task) pumpTask = null;
+        if (released || finishing) return;
+        if (pending > 0) queueMicrotask(pump);
+        else raf = requestAnimationFrame(pump);
+      });
+    };
+    pump();
+
+    const diagnostics = (): InputDiagnostics => ({
+      backend: started.backend,
+      native: started.native,
+      unadjusted: started.unadjusted,
+      fallbackReason: null,
+      registered: started.registered,
+      capacity: started.capacity,
+      packetCount: latest.rawPackets,
+      eventCount: latest.emittedEvents,
+      movementPackets: latest.movementPackets,
+      buttonEvents: latest.buttonEvents,
+      deviceCount: latest.deviceCount,
+      peakPending: latest.peakPending,
+      currentPending: latest.pending,
+      dropped: latest.dropped,
+      firstPacketMs: latest.firstPacketMs,
+      lastPacketMs: latest.lastPacketMs,
+      firstEventMs: latest.firstEventMs,
+      lastEventMs: latest.lastEventMs,
+      packetHz: packetRate(
+        latest.rawPackets,
+        latest.firstPacketMs,
+        latest.lastPacketMs,
+      ),
+    });
+    const releaseLocalResources = () => {
+      released = true;
+      cancelAnimationFrame(raf);
+      document.removeEventListener('pointerlockchange', onLock);
+      if (document.pointerLockElement === canvas) document.exitPointerLock();
+    };
 
     return {
       id: started.backend,
@@ -186,14 +340,25 @@ export const WINDOWS_NATIVE_INPUT_BACKEND: InputBackend = {
       // Raw relative counts bypass Windows pointer acceleration regardless of
       // whether WebView2 accepted the optional unadjusted pointer-lock flag.
       unadjusted: started.unadjusted,
-      dropped: () => dropped,
+      diagnostics,
+      async finish() {
+        if (released) return diagnostics();
+        finishing = true;
+        cancelAnimationFrame(raf);
+        await pumpTask;
+        try {
+          const finalBatch = await invoke<NativeBatch>('stop_native_input');
+          applyBatch(finalBatch);
+        } finally {
+          releaseLocalResources();
+        }
+        return diagnostics();
+      },
       release() {
         if (released) return;
-        released = true;
-        cancelAnimationFrame(raf);
-        document.removeEventListener('pointerlockchange', onLock);
+        finishing = true;
+        releaseLocalResources();
         void invoke('stop_native_input');
-        if (document.pointerLockElement === canvas) document.exitPointerLock();
       },
     };
   },
@@ -214,7 +379,15 @@ export const createPreferredInputBackend = (
       const session = await nativeBackend.acquire(canvas, handlers);
       if (session) return session;
     }
-    return browserBackend.acquire(canvas, handlers);
+    const browser = await browserBackend.acquire(canvas, handlers);
+    if (!browser || !preferNative) return browser;
+    return {
+      ...browser,
+      diagnostics: () => ({
+        ...browser.diagnostics(),
+        fallbackReason: 'native-backend-unavailable',
+      }),
+    };
   },
 });
 

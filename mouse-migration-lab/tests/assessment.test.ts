@@ -161,11 +161,107 @@ describe('run evidence assessment', () => {
       native: true,
       unadjusted: true,
       dropped: 3,
+      diagnostics: {
+        backend: 'windows-wm-input',
+        native: true,
+        unadjusted: true,
+        fallbackReason: null,
+        registered: true,
+        capacity: 16_384,
+        packetCount: 100,
+        eventCount: 96,
+        movementPackets: 96,
+        buttonEvents: 3,
+        deviceCount: 1,
+        peakPending: 12,
+        currentPending: 0,
+        dropped: 3,
+        firstPacketMs: 1,
+        lastPacketMs: 1000,
+        firstEventMs: 1,
+        lastEventMs: 1000,
+        packetHz: 99.1,
+      },
     };
     const quality = assessRun(run);
     expect(quality.inputDropped).toBe(3);
     expect(quality.hardInvalid).toContain('原始输入缓冲丢失 3 个事件');
     expect(quality.minimumQuality).toBe(false);
+  });
+
+  it('requires packets only for native runs and warns on aggregated mice', () => {
+    const native = makeRun();
+    native.settings.inputBackend = {
+      id: 'windows-wm-input',
+      native: true,
+      unadjusted: true,
+      diagnostics: {
+        backend: 'windows-wm-input',
+        native: true,
+        unadjusted: true,
+        fallbackReason: null,
+        registered: true,
+        capacity: 16_384,
+        packetCount: 0,
+        eventCount: 0,
+        movementPackets: 0,
+        buttonEvents: 0,
+        deviceCount: 0,
+        peakPending: 0,
+        currentPending: 0,
+        dropped: 0,
+        firstPacketMs: null,
+        lastPacketMs: null,
+        firstEventMs: null,
+        lastEventMs: null,
+        packetHz: null,
+      },
+    };
+    expect(assessRun(native).hardInvalid).toContain(
+      'WM_INPUT 未收到原始数据包',
+    );
+
+    const nativeDiagnostics = native.settings.inputBackend.diagnostics!;
+    nativeDiagnostics.packetCount = 20;
+    nativeDiagnostics.eventCount = 20;
+    nativeDiagnostics.buttonEvents = 20;
+    nativeDiagnostics.peakPending = 2;
+    nativeDiagnostics.firstPacketMs = 1;
+    nativeDiagnostics.lastPacketMs = 20;
+    nativeDiagnostics.firstEventMs = 1;
+    nativeDiagnostics.lastEventMs = 20;
+    nativeDiagnostics.packetHz = 1000;
+    const noMovementOrDevice = assessRun(native);
+    expect(noMovementOrDevice.hardInvalid).toContain(
+      'WM_INPUT 未收到鼠标移动数据',
+    );
+    expect(noMovementOrDevice.hardInvalid).toContain(
+      'WM_INPUT 无法归因到物理鼠标设备',
+    );
+
+    nativeDiagnostics.movementPackets = 20;
+    nativeDiagnostics.buttonEvents = 0;
+    nativeDiagnostics.deviceCount = 2;
+    nativeDiagnostics.currentPending = 1;
+    expect(assessRun(native).hardInvalid).toContain(
+      'WM_INPUT 结束时仍有 1 个事件未处理',
+    );
+    nativeDiagnostics.currentPending = 0;
+    const multiple = assessRun(native);
+    expect(multiple.hardInvalid).not.toContain('WM_INPUT 未收到原始数据包');
+    expect(multiple.warnings).toContain(
+      '检测到 2 个鼠标设备，聚合输入会污染设备归因',
+    );
+
+    const browser = makeRun();
+    browser.settings.inputBackend = {
+      id: 'browser-pointer-lock',
+      native: false,
+      unadjusted: true,
+    };
+    expect(assessRun(browser).hardInvalid).not.toContain(
+      'WM_INPUT 未收到原始数据包',
+    );
   });
 });
 

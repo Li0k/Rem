@@ -185,6 +185,26 @@ the mouse's hardware polling rate.
 - On physical Windows hardware, confirm `windows-wm-input`, zero dropped events,
   ESC cleanup, repeated start/stop, mouse buttons, and measured input event rate.
 
+### Physical Windows 30-second WM_INPUT acceptance
+
+1. Launch the packaged desktop app, select a 30 second click protocol, enter the
+   arena, move continuously, and press left/right/middle mouse buttons at least
+   once. Do not connect or move a second mouse during the run.
+2. In the live Input diagnostics strip, confirm the backend is
+   `windows-wm-input`, packet/event counters increase, packet Hz becomes a
+   number, device count is `1`, and dropped remains `0`.
+3. Finish the run normally and inspect the exported/result Input diagnostics.
+   It is a valid native capture only when `native=true`, `registered=true`,
+   `packetCount>0`, `movementPackets>0`, `deviceCount=1`, and `dropped=0`.
+4. Treat `packetCount=0`, `movementPackets=0`, `deviceCount=0`, any dropped
+   event, or a non-zero final `currentPending` as hard invalid. Treat
+   `deviceCount>1` as a warning because aggregated mice make attribution
+   ambiguous. A `browser-pointer-lock` result is an explicit fallback; inspect
+   `fallbackReason` and do not claim that run proved WM_INPUT.
+5. Press ESC during a second short run, then start again. The new session must
+   begin with reset counters and continue receiving packets, proving scoped
+   `RIDEV_NOLEGACY` registration and cleanup.
+
 ## Non-goals for this MVP
 
 - Automatic sensitivity recommendation or adaptive optimization algorithm.

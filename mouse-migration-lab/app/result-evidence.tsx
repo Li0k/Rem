@@ -81,6 +81,13 @@ export default function ResultEvidence({
           value={protocolFor(run.settings.testMode).name}
           detail={`${run.settings.duration}s · ${run.settings.fov}° H-FOV · ${run.settings.degreesPerCount.toFixed(4)}°/unit · seed ${run.settings.seed}`}
         />
+        {run.settings.inputBackend?.diagnostics && (
+          <EvidenceCell
+            label="Input diagnostics"
+            value={`${run.settings.inputBackend.diagnostics.backend} · ${run.settings.inputBackend.diagnostics.native ? 'native' : 'browser'}`}
+            detail={`packets ${run.settings.inputBackend.diagnostics.packetCount} · events ${run.settings.inputBackend.diagnostics.eventCount} · move/button ${run.settings.inputBackend.diagnostics.movementPackets}/${run.settings.inputBackend.diagnostics.buttonEvents} · ${run.settings.inputBackend.diagnostics.packetHz?.toFixed(0) ?? '—'} Hz · devices ${run.settings.inputBackend.diagnostics.deviceCount} · peak ${run.settings.inputBackend.diagnostics.peakPending}/${run.settings.inputBackend.diagnostics.capacity || 'n/a'} · pending ${run.settings.inputBackend.diagnostics.currentPending} · dropped ${run.settings.inputBackend.diagnostics.dropped} · event t ${run.settings.inputBackend.diagnostics.firstEventMs?.toFixed(1) ?? '—'}–${run.settings.inputBackend.diagnostics.lastEventMs?.toFixed(1) ?? '—'} ms${run.settings.inputBackend.diagnostics.fallbackReason && run.settings.inputBackend.diagnostics.fallbackReason !== 'not-applicable' ? ` · fallback ${run.settings.inputBackend.diagnostics.fallbackReason}` : ''}`}
+          />
+        )}
       </div>
 
       <QualityPanel quality={quality} />
@@ -251,6 +258,12 @@ function QualityPanel({ quality }: { quality: EvidenceQuality }) {
         <span>完成度：{quality.completed ? '通过' : '不足'}</span>
         <span>输入事件：{quality.inputEvents}</span>
         <span>输入丢包：{quality.inputDropped}</span>
+        <span>
+          Native packets：{quality.nativeInput ? quality.nativePackets : 'n/a'}
+        </span>
+        <span>
+          输入设备：{quality.nativeInput ? quality.inputDeviceCount : 'n/a'}
+        </span>
         {quality.clickSamples > 0 && (
           <span>点击样本：{quality.clickSamples}</span>
         )}

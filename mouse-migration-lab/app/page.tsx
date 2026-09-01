@@ -60,7 +60,7 @@ import {
   type Metrics,
   type RunData,
 } from './schema';
-import { INPUT_BACKEND } from './input';
+import { INPUT_BACKEND, type InputDiagnostics } from './input';
 
 const ResultEvidence = lazy(() => import('./result-evidence'));
 
@@ -75,7 +75,7 @@ const PIXEL_LABEL =
 
 type Mode = 'ready' | 'running' | 'result' | 'replay';
 type Runtime = {
-  mode: 'running' | 'stopped';
+  mode: 'running' | 'stopping' | 'stopped';
   settings: RunData['settings'];
   start: number;
   yaw: number;
@@ -97,6 +97,7 @@ type Runtime = {
   movePitch: Float32Array;
   moveTarget: Int32Array;
   moveCount: number;
+  recordingOverflow: boolean;
   inputCount: number;
   path: number;
   lastFrame: number;
@@ -104,7 +105,8 @@ type Runtime = {
   frameOverflow: number;
   frameBinMs: number;
   cleanup?: () => void;
-  inputDropped?: () => number;
+  finishInput?: () => Promise<InputDiagnostics>;
+  inputDiagnostics?: () => InputDiagnostics;
   destroy?: () => void;
   longTasks: number;
   longTaskObserver?: PerformanceObserver;
@@ -216,6 +218,8 @@ export default function Home() {
   const [compareId, setCompareId] = useState('');
   const [metrics, setMetrics] = useState<Metrics>(freshMetrics);
   const [remainingMs, setRemainingMs] = useState(0);
+  const [inputDiagnostics, setInputDiagnostics] =
+    useState<InputDiagnostics | null>(null);
   const [error, setError] = useState('');
   const [run, setRun] = useState<RunData | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -401,18 +405,51 @@ export default function Home() {
     return () => renderer?.destroy();
   }, [mode, protocol.radius, selectedMode]);
 
-  const stop = useCallback((next: Mode = 'result') => {
+  const stop = useCallback(async (next: Mode = 'result') => {
     const rt = runtime.current;
     if (!rt || rt.mode !== 'running') return;
-    rt.mode = 'stopped';
+    rt.mode = 'stopping';
     cancelAnimationFrame(rt.raf);
-    if (rt.settings.inputBackend)
-      rt.settings.inputBackend.dropped = rt.inputDropped?.() ?? 0;
-    rt.cleanup?.();
+    const stopRequestedAt = performance.now();
+    let diagnostics = rt.inputDiagnostics?.();
+    try {
+      diagnostics = (await rt.finishInput?.()) ?? diagnostics;
+    } catch (inputError) {
+      setError(`停止原始输入失败：${String(inputError)}`);
+      rt.cleanup?.();
+      rt.mode = 'stopped';
+      rt.longTaskObserver?.disconnect();
+      rt.destroy?.();
+      clearInterval(rt.uiTimer);
+      runtime.current = null;
+      setMode('ready');
+      return;
+    }
+    rt.mode = 'stopped';
+    if (rt.recordingOverflow) {
+      rt.longTaskObserver?.disconnect();
+      rt.destroy?.();
+      clearInterval(rt.uiTimer);
+      runtime.current = null;
+      setMode('ready');
+      return;
+    }
+    if (rt.settings.inputBackend && diagnostics) {
+      rt.settings.inputBackend.dropped = diagnostics.dropped;
+      rt.settings.inputBackend.diagnostics = diagnostics;
+      setInputDiagnostics(diagnostics);
+    }
     rt.longTaskObserver?.disconnect();
     rt.destroy?.();
     clearInterval(rt.uiTimer);
-    const elapsed = Math.max(1, performance.now() - rt.start);
+    const lastInputAt = rt.moveCount > 0 ? rt.moveT[rt.moveCount - 1] : 0;
+    const lastClickAt = rt.clicks.at(-1)?.t ?? 0;
+    const elapsed = Math.max(
+      1,
+      stopRequestedAt - rt.start,
+      lastInputAt,
+      lastClickAt,
+    );
     const resultMetrics = frameMetrics(rt, elapsed);
     const data: RunData = {
       schema: 2,
@@ -521,6 +558,7 @@ export default function Home() {
       movePitch: new Float32Array(capacity),
       moveTarget: new Int32Array(capacity),
       moveCount: 0,
+      recordingOverflow: false,
       inputCount: 0,
       path: 0,
       lastFrame: 0,
@@ -673,7 +711,7 @@ export default function Home() {
       return { target: best, error };
     };
     const shoot = (timestamp = performance.now()) => {
-      if (rt.mode !== 'running') return;
+      if (rt.mode === 'stopped') return;
       const now = Math.max(0, timestamp - rt.start);
       updateTargets(now);
       const { target, error: angularError } = nearest();
@@ -704,10 +742,11 @@ export default function Home() {
       }
     };
     const onMove = (dx: number, dy: number, timestamp: number) => {
-      if (rt.mode !== 'running') return;
+      if (rt.mode === 'stopped') return;
       if (rt.moveCount >= capacity) {
+        rt.recordingOverflow = true;
         setError('记录缓冲已满，运行已停止');
-        stop();
+        void stop();
         return;
       }
       rt.yaw = wrapDegrees(rt.yaw - dx * settings.degreesPerCount);
@@ -723,7 +762,7 @@ export default function Home() {
       rt.inputCount += 1;
     };
     const onDown = (button: number, timestamp: number) => {
-      if (button !== 0 || rt.mode !== 'running') return;
+      if (button !== 0 || rt.mode === 'stopped') return;
       if (selectedMode === 'tracking') rt.firing = true;
       else shoot(timestamp);
     };
@@ -734,7 +773,7 @@ export default function Home() {
       move: onMove,
       buttonDown: onDown,
       buttonUp: onUp,
-      lost: () => stop(),
+      lost: () => void stop(),
     });
     if (!input) {
       rt.destroy?.();
@@ -744,12 +783,16 @@ export default function Home() {
       return;
     }
     rt.cleanup = input.release;
-    rt.inputDropped = input.dropped;
+    rt.finishInput = input.finish;
+    rt.inputDiagnostics = input.diagnostics;
+    const initialDiagnostics = input.diagnostics();
+    setInputDiagnostics(initialDiagnostics);
     rt.settings.inputBackend = {
       id: input.id,
       native: input.native,
       unadjusted: input.unadjusted,
       dropped: 0,
+      diagnostics: initialDiagnostics,
     };
     rt.start = performance.now();
     rt.lastFrame = rt.start;
@@ -771,8 +814,9 @@ export default function Home() {
     const frame = (now: number) => {
       if (rt.mode !== 'running') return;
       if (rt.frameCount >= rt.frames.length) {
+        rt.recordingOverflow = true;
         setError('帧记录缓冲已满，运行已停止');
-        stop();
+        void stop();
         return;
       }
       const delta = now - rt.lastFrame;
@@ -791,7 +835,7 @@ export default function Home() {
       }
       renderer.render();
       if (elapsed >= settings.duration * 1000) {
-        stop();
+        void stop();
         return;
       }
       // oxlint-disable-next-line react/react-compiler
@@ -838,6 +882,7 @@ export default function Home() {
         longTasks: rt.longTasks,
       }));
       setRemainingMs(Math.max(0, settings.duration * 1000 - elapsed));
+      setInputDiagnostics(rt.inputDiagnostics?.() ?? null);
     }, 500);
     rt.raf = requestAnimationFrame(frame);
   }, [
@@ -860,7 +905,7 @@ export default function Home() {
   useEffect(
     () => () => {
       const rt = runtime.current;
-      if (rt?.mode === 'running') stop();
+      if (rt?.mode === 'running') void stop();
       else if (rt) {
         rt.cleanup?.();
         rt.destroy?.();
@@ -1507,8 +1552,26 @@ export default function Home() {
                   <small className="ml-1 text-[10px]">S</small>
                 </strong>
                 <span className="flex items-center gap-2 font-pixel text-[7px] uppercase tracking-[0.06em]">
-                  <i className="size-1.5 animate-pulse bg-pink" /> RAW INPUT
+                  <i className="size-1.5 animate-pulse bg-pink" />{' '}
+                  {inputDiagnostics?.native ? 'WM_INPUT' : 'POINTER LOCK'}
                 </span>
+              </div>
+            )}
+
+            {mode === 'running' && inputDiagnostics && (
+              <div className="pointer-events-none absolute bottom-4 left-4 z-30 border border-white/60 bg-plum/70 px-2 py-1 font-mono text-[8px] text-white [text-shadow:1px_1px_0_#3d1830]">
+                {inputDiagnostics.backend} · packets{' '}
+                {inputDiagnostics.packetCount} · events{' '}
+                {inputDiagnostics.eventCount} (
+                {inputDiagnostics.movementPackets}/
+                {inputDiagnostics.buttonEvents}) ·{' '}
+                {inputDiagnostics.packetHz?.toFixed(0) ?? '—'} Hz · devices{' '}
+                {inputDiagnostics.deviceCount} · peak{' '}
+                {inputDiagnostics.peakPending} · dropped{' '}
+                {inputDiagnostics.dropped}
+                {inputDiagnostics.fallbackReason !== null &&
+                  inputDiagnostics.fallbackReason !== 'not-applicable' &&
+                  ' · FALLBACK'}
               </div>
             )}
 
