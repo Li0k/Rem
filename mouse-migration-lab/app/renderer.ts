@@ -60,7 +60,7 @@ void main(){
   float cy=cos(yaw), sy=sin(yaw), cp=cos(pitch), sp=sin(pitch);
   float yawedZ=sp*local.y+cp*local.z;
   vec3 ray=normalize(vec3(cy*local.x+sy*yawedZ,cp*local.y-sp*local.z,-sy*local.x+cy*yawedZ));
-  vec3 base=mix(vec3(.78,.75,.81),vec3(.94,.91,.94),smoothstep(.05,1.,1.-uv.y));
+  vec3 base=mix(vec3(.80,.84,.88),vec3(.95,.96,.97),smoothstep(.05,1.,1.-uv.y));
   vec3 result=base;
   float hitT=1e9;
   if(ray.y<-.0001){
@@ -70,7 +70,7 @@ void main(){
       float line=gridLine(p.xz,3.);
       float fine=gridLine(p.xz,.75)*.24;
       float fade=exp(-t*.032);
-      result=mix(result,vec3(.57,.28,.46),min(1.,(line+fine)*fade*.62));
+      result=mix(result,vec3(.47,.56,.66),min(1.,(line+fine)*fade*.62));
       hitT=t;
     }
   }
@@ -81,8 +81,8 @@ void main(){
       float line=gridLine(p.xy,3.);
       float fine=gridLine(p.xy,.75)*.24;
       float fade=exp(-t*.020);
-      result=mix(result,vec3(.66,.30,.49),min(1.,(line+fine)*fade*.58));
-      result+=vec3(.07,.035,.06)*fade;
+      result=mix(result,vec3(.40,.49,.61),min(1.,(line+fine)*fade*.58));
+      result+=vec3(.035,.05,.075)*fade;
       hitT=t;
     }
   }
@@ -105,12 +105,12 @@ void main(){
   if(d>1.)discard;
   float ring=smoothstep(.72,.96,d);
   if(vTone>1.5){
-    color=vec4(vec3(.20,.08,.18)*(1.-.18*d),1.);
+    color=vec4(vec3(.13,.17,.25)*(1.-.18*d),1.);
     return;
   }
   float light=.76+.24*max(0.,1.-length(p-vec2(-.28,-.28)));
-  vec3 base=mix(vec3(1.,.14,.49),vec3(1.,.48,.69),vTone);
-  color=vec4(mix(base*light,vec3(1.,.91,.96),ring*.68),1.);
+  vec3 base=mix(vec3(.40,.48,.65),vec3(.61,.70,.81),vTone);
+  color=vec4(mix(base*light,vec3(.91,.95,.98),ring*.68),1.);
 }`;
 
   const compile = (type: number, source: string) => {

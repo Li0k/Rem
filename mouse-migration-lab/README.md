@@ -6,10 +6,10 @@ backend; web and macOS use browser Pointer Lock.
 
 ## Version and run data
 
-- Application/package/Tauri version: `0.2.0`
+- Application/package/Tauri version: `0.3.0`
 - Public run schema: `schema: 2`
-- Schema-2 runs written by the previous `0.1.0` package metadata are accepted
-  and normalized to `appVersion: 0.2.0` on import. Measurement arrays and
+- Schema-2 runs written by the previous `0.1.0` and `0.2.0` builds are accepted
+  and normalized to `appVersion: 0.3.0` on import. Measurement arrays and
   metrics are not rewritten.
 
 ## Windows build
@@ -38,8 +38,21 @@ the Tauri bundler performs the Vite production build.
   counts while the training session is active.
 - Pointer Lock still owns cursor capture and ESC; DOM mouse events are not
   consumed by the native session, avoiding double counting.
+- Native start/stop runs on the Windows UI thread, preserves WebView2 legacy
+  messages, and restores Tao's prior process-wide Raw Input registration.
 - Packets are drained from a bounded Rust queue in batches. Exported run
   metadata includes the backend and dropped-event count.
 - Multiple physical mouse handles are currently aggregated. Real-device
   validation on Windows is required before treating this as a calibrated HID
   identity layer.
+
+## Timing semantics
+
+New runs carry `timingModel: dual-v2`. Each click has an attempt anchor:
+multi-target rounds use round start then the previous click, while refreshed
+single-target protocols use spawn/refresh (hold uses the latest reveal cue).
+`reactionTime` is anchor to effective movement onset, `movementTime` is onset to
+hit, and `completionTime` is anchor to hit. Onset is derived from recorded
+input with a deadband and bounded idle-gap backtracking; no reliable onset is
+reported as unavailable. `exposureAge` is diagnostic only. Reflex remains
+spawn-to-hit. Legacy and obsolete `dual-v1` runs are not compared with v2.

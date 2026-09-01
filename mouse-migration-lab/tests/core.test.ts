@@ -2,18 +2,23 @@ import { describe, expect, it } from 'vitest';
 import { parseRun } from '../app/schema';
 import {
   anglesToWorld,
+  applyMovingTargetState,
   angularDistance,
   angularError,
+  attemptPathEfficiency,
   comparisonCompatibility,
   comparisonDeltas,
   deltaImprovesMetric,
   countAbove,
   degreesPerCount,
+  findAngularClearance,
+  hasAngularClearance,
   median,
   mulberry32,
   percentile,
   projectWorldYXZ,
   spawnTarget,
+  sphericalAngularDistance,
   summarizeHistogram,
   type Target,
 } from '../app/core';
@@ -21,7 +26,7 @@ import {
 const validRun = () => ({
   schema: 2,
   app: 'mouse-migration-lab',
-  appVersion: '0.2.0',
+  appVersion: '0.3.0',
   createdAt: '2026-09-01T00:00:00.000Z',
   userAgent: 'fixture',
   elapsedMs: 20,
@@ -101,6 +106,34 @@ describe('replay primitives', () => {
     expect(visible.idealDistance).toBeGreaterThan(0);
   });
 
+  it('keeps visible target discs separated in angular space', () => {
+    const occupied = [{ yaw: 0, pitch: 0, radius: 1.5 }];
+    expect(
+      hasAngularClearance({ yaw: 2, pitch: 0, radius: 1.5 }, occupied),
+    ).toBe(false);
+    expect(
+      hasAngularClearance({ yaw: 4, pitch: 0, radius: 1.5 }, occupied),
+    ).toBe(true);
+    const fallback = findAngularClearance(
+      [
+        { yaw: 0, pitch: 0, radius: 1.5 },
+        { yaw: 8, pitch: 0, radius: 1.5 },
+      ],
+      1.5,
+      { yaw: [-20, 20], pitch: [-10, 10] },
+    );
+    expect(fallback).not.toBeNull();
+    expect(
+      hasAngularClearance(
+        { yaw: fallback![0], pitch: fallback![1], radius: 1.5 },
+        [
+          { yaw: 0, pitch: 0, radius: 1.5 },
+          { yaw: 8, pitch: 0, radius: 1.5 },
+        ],
+      ),
+    ).toBe(true);
+  });
+
   it('projects targets through the same YXZ camera transform', () => {
     const world = new Float32Array(3);
     const screen = new Float32Array(3);
@@ -131,6 +164,20 @@ describe('replay primitives', () => {
     expect(degreesPerCount(0.32, 0.06995)).toBeCloseTo(0.022384, 8);
   });
 
+  it('measures path efficiency from the current attempt anchor', () => {
+    expect(attemptPathEfficiency(10, 20, 0, 30, 0)).toBeCloseTo(1);
+    expect(attemptPathEfficiency(10, 20, 0, 30, 0)).not.toBeCloseTo(
+      10 / sphericalAngularDistance(0, 0, 30, 0),
+    );
+  });
+
+  it('keeps hold motion state in the replay record after a respawn', () => {
+    const target = spawnTarget(1, 100, 0, 0, 8, 2, 1);
+    applyMovingTargetState(target, -1, 22);
+    expect(target.direction).toBe(-1);
+    expect(target.distance).toBe(22);
+  });
+
   it('only compares runs with the same protocol contract', () => {
     const base = {
       testMode: 'single' as const,
@@ -148,6 +195,12 @@ describe('replay primitives', () => {
       compatible: false,
       reasons: ['协议不同'],
     });
+    expect(
+      comparisonCompatibility(
+        { ...base, timingModel: 'legacy-response' },
+        { ...base, timingModel: 'dual-v2' },
+      ),
+    ).toEqual({ compatible: false, reasons: ['计时语义不同'] });
   });
 
   it('derives directional percentage deltas without dividing by zero', () => {
@@ -206,9 +259,24 @@ describe('replay primitives', () => {
   it('accepts a valid replay fixture and rejects broken contracts', () => {
     expect(parseRun(validRun())).not.toBeNull();
 
+    const previousVersion = validRun();
+    previousVersion.appVersion = '0.2.0';
+    expect(parseRun(previousVersion)?.appVersion).toBe('0.3.0');
+
     const legacyVersion = validRun();
     legacyVersion.appVersion = '0.1.0';
-    expect(parseRun(legacyVersion)?.appVersion).toBe('0.2.0');
+    expect(parseRun(legacyVersion)?.appVersion).toBe('0.3.0');
+
+    const dual = validRun();
+    (dual.settings as Record<string, unknown>).timingModel = 'dual-v2';
+    (dual.clicks[0] as Record<string, unknown>).attemptAnchor = 0;
+    (dual.clicks[0] as Record<string, unknown>).movementOnset = 10;
+    (dual.clicks[0] as Record<string, unknown>).reactionTime = 10;
+    (dual.clicks[0] as Record<string, unknown>).movementTime = 8;
+    (dual.clicks[0] as Record<string, unknown>).completionTime = 18;
+    expect(parseRun(dual)).not.toBeNull();
+    (dual.clicks[0] as Record<string, unknown>).movementTime = 20;
+    expect(parseRun(dual)).toBeNull();
 
     const uneven = validRun();
     uneven.movement.dy.pop();

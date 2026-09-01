@@ -2,6 +2,7 @@ export type Target = {
   id: number;
   spawn: number;
   despawn?: number;
+  revealAt?: number;
   yaw: number;
   pitch: number;
   radius: number;
@@ -53,6 +54,7 @@ export type ComparisonInput = {
   duration: number;
   fov: number;
   seed: number;
+  timingModel?: 'legacy-response' | 'dual-v1' | 'dual-v2';
 };
 
 export const VALORANT_YAW_DEGREES = 0.07;
@@ -143,6 +145,9 @@ export function comparisonCompatibility(
   if (a.duration !== b.duration) reasons.push('时长不同');
   if (Math.abs(a.fov - b.fov) > 0.001) reasons.push('H-FOV 不同');
   if (a.seed !== b.seed) reasons.push('Seed 不同');
+  const timingA = a.timingModel ?? 'legacy-response';
+  const timingB = b.timingModel ?? 'legacy-response';
+  if (timingA !== timingB) reasons.push('计时语义不同');
   return { compatible: reasons.length === 0, reasons };
 }
 
@@ -277,6 +282,84 @@ export function projectWorldYXZ(
 
 export function angularError(yaw: number, pitch: number, target: Target) {
   return sphericalAngularDistance(yaw, pitch, target.yaw, target.pitch);
+}
+
+export function attemptPathEfficiency(
+  actualPath: number,
+  anchorYaw: number,
+  anchorPitch: number,
+  targetYaw: number,
+  targetPitch: number,
+) {
+  const ideal = sphericalAngularDistance(
+    anchorYaw,
+    anchorPitch,
+    targetYaw,
+    targetPitch,
+  );
+  return Math.max(0, actualPath) / Math.max(0.001, ideal);
+}
+
+export function applyMovingTargetState(
+  target: Target,
+  direction: -1 | 1,
+  distance: number,
+) {
+  target.direction = direction;
+  target.distance = distance;
+  return target;
+}
+
+export type AngularTarget = Pick<Target, 'yaw' | 'pitch' | 'radius'>;
+
+export function hasAngularClearance(
+  candidate: AngularTarget,
+  occupied: AngularTarget[],
+  gap = 0.4,
+) {
+  return occupied.every(
+    (target) =>
+      sphericalAngularDistance(
+        candidate.yaw,
+        candidate.pitch,
+        target.yaw,
+        target.pitch,
+      ) >=
+      candidate.radius + target.radius + gap,
+  );
+}
+
+export type AngularBounds = {
+  yaw: readonly [number, number];
+  pitch: readonly [number, number];
+};
+
+/**
+ * Finds a deterministic safe respawn position when random sampling misses the
+ * available cells. The search is deliberately small and only runs after a
+ * spawn, never in the input/render hot path.
+ */
+export function findAngularClearance(
+  occupied: AngularTarget[],
+  radius: number,
+  bounds: AngularBounds,
+  gap = 0.4,
+) {
+  const yawSteps = 72;
+  const pitchSteps = 36;
+  for (let pitchIndex = 0; pitchIndex <= pitchSteps; pitchIndex += 1) {
+    const pitch =
+      bounds.pitch[0] +
+      ((bounds.pitch[1] - bounds.pitch[0]) * pitchIndex) / pitchSteps;
+    for (let yawIndex = 0; yawIndex <= yawSteps; yawIndex += 1) {
+      const yaw =
+        bounds.yaw[0] + ((bounds.yaw[1] - bounds.yaw[0]) * yawIndex) / yawSteps;
+      const candidate = { yaw, pitch, radius };
+      if (hasAngularClearance(candidate, occupied, gap))
+        return [yaw, pitch] as const;
+    }
+  }
+  return null;
 }
 
 export function spawnTarget(

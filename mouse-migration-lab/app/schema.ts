@@ -1,8 +1,9 @@
 import type { Target, TestMode } from './core';
+import type { TimingModel } from './timing';
 
 export const RUN_SCHEMA = 2 as const;
-export const APP_VERSION = '0.2.0' as const;
-const LEGACY_APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.3.0' as const;
+const LEGACY_APP_VERSIONS = new Set(['0.1.0', '0.2.0']);
 
 export type DeviceProfileSnapshot = {
   id: string;
@@ -20,6 +21,16 @@ export type Click = {
   error: number;
   acquisition: number;
   pathEfficiency: number;
+  /** Deprecated dual-v1 field: target spawn/refresh -> click. */
+  responseTime?: number;
+  /** dual-v2 attempt anchor -> effective movement onset -> click fields. */
+  attemptAnchor?: number;
+  movementOnset?: number | null;
+  reactionTime?: number | null;
+  movementTime?: number | null;
+  completionTime?: number;
+  /** Diagnostic only; never used as the primary cross-protocol metric. */
+  exposureAge?: number | null;
 };
 
 export type Metrics = {
@@ -76,6 +87,7 @@ export type RunData = {
     fov: number;
     testMode: TestMode;
     valorantSensitivity: number;
+    timingModel?: TimingModel;
     gameMapping?: {
       profile: 'valorant';
       yawDegrees: number;
@@ -137,6 +149,7 @@ export function parseRun(value: unknown): RunData | null {
   const settingFov = settings?.fov as number;
   const settingTestMode = settings?.testMode;
   const settingValorantSensitivity = settings?.valorantSensitivity as number;
+  const timingModel = settings?.timingModel;
   const gameMapping = settings?.gameMapping as
     | Record<string, unknown>
     | undefined;
@@ -231,7 +244,8 @@ export function parseRun(value: unknown): RunData | null {
   if (
     v.schema !== RUN_SCHEMA ||
     v.app !== 'mouse-migration-lab' ||
-    (v.appVersion !== APP_VERSION && v.appVersion !== LEGACY_APP_VERSION) ||
+    (v.appVersion !== APP_VERSION &&
+      !LEGACY_APP_VERSIONS.has(String(v.appVersion))) ||
     typeof v.createdAt !== 'string' ||
     typeof v.userAgent !== 'string' ||
     !finite(elapsedMs) ||
@@ -267,6 +281,10 @@ export function parseRun(value: unknown): RunData | null {
     !finite(settingValorantSensitivity) ||
     settingValorantSensitivity <= 0 ||
     settingValorantSensitivity > 10 ||
+    (timingModel !== undefined &&
+      timingModel !== 'legacy-response' &&
+      timingModel !== 'dual-v1' &&
+      timingModel !== 'dual-v2') ||
     (gameMapping !== undefined &&
       (!gameMapping ||
         gameMapping.profile !== 'valorant' ||
@@ -321,6 +339,7 @@ export function parseRun(value: unknown): RunData | null {
         (!finite(target.speed) || (target.speed as number) <= 0)) ||
       (target.distance !== undefined && !finite(target.distance)) ||
       (target.despawn !== undefined && !finite(target.despawn)) ||
+      (target.revealAt !== undefined && !finite(target.revealAt)) ||
       (target.radius as number) <= 0 ||
       (target.radius as number) > 5 ||
       (target.distance !== undefined && (target.distance as number) <= 0) ||
@@ -336,6 +355,14 @@ export function parseRun(value: unknown): RunData | null {
       target.despawn !== undefined &&
       ((target.despawn as number) < (target.spawn as number) ||
         (target.despawn as number) > elapsedMs + 1000)
+    )
+      return null;
+    if (
+      target.revealAt !== undefined &&
+      ((target.revealAt as number) < (target.spawn as number) ||
+        (target.despawn !== undefined &&
+          (target.revealAt as number) > (target.despawn as number) + 1) ||
+        (target.revealAt as number) > elapsedMs + 1000)
     )
       return null;
     previousTargetSpawn = target.spawn as number;
@@ -385,6 +412,38 @@ export function parseRun(value: unknown): RunData | null {
       !finite(item.error) ||
       !finite(item.acquisition) ||
       !finite(item.pathEfficiency) ||
+      (item.responseTime !== undefined &&
+        (!finite(item.responseTime) || (item.responseTime as number) < 0)) ||
+      (item.attemptAnchor !== undefined &&
+        (!finite(item.attemptAnchor) || (item.attemptAnchor as number) < 0)) ||
+      (item.movementOnset !== undefined &&
+        !nullableNonNegative(item.movementOnset)) ||
+      (item.reactionTime !== undefined &&
+        !nullableNonNegative(item.reactionTime)) ||
+      (item.movementTime !== undefined &&
+        !nullableNonNegative(item.movementTime)) ||
+      (item.completionTime !== undefined &&
+        (!finite(item.completionTime) ||
+          (item.completionTime as number) < 0)) ||
+      (item.exposureAge !== undefined &&
+        !nullableNonNegative(item.exposureAge)) ||
+      (item.attemptAnchor !== undefined &&
+        (item.attemptAnchor as number) > (item.t as number) + 1) ||
+      (item.movementOnset !== undefined &&
+        item.movementOnset !== null &&
+        ((item.movementOnset as number) <
+          ((item.attemptAnchor as number) ?? 0) ||
+          (item.movementOnset as number) > (item.t as number) + 1)) ||
+      (item.reactionTime !== undefined &&
+        item.reactionTime !== null &&
+        item.movementTime !== undefined &&
+        item.movementTime !== null &&
+        item.completionTime !== undefined &&
+        Math.abs(
+          (item.reactionTime as number) +
+            (item.movementTime as number) -
+            (item.completionTime as number),
+        ) > 2) ||
       (item.error as number) < 0 ||
       (item.acquisition as number) < 0 ||
       (item.pathEfficiency as number) < 0 ||
@@ -410,6 +469,32 @@ export function parseRun(value: unknown): RunData | null {
       )
         return null;
     }
+    if (timingModel === 'dual-v2' && item.responseTime !== undefined)
+      return null;
+    if (timingModel === 'dual-v2' && item.targetId !== -1 && item.hit) {
+      const anchor = item.attemptAnchor as number | undefined;
+      const completion = item.completionTime as number | undefined;
+      const reaction = item.reactionTime as number | null | undefined;
+      const movement = item.movementTime as number | null | undefined;
+      if (anchor === undefined || completion === undefined) return null;
+      if (Math.abs(completion - ((item.t as number) - anchor)) > 2) return null;
+      if (
+        reaction === undefined ||
+        movement === undefined ||
+        (reaction === null) !== (movement === null)
+      )
+        return null;
+      if (reaction === null && item.movementOnset !== null) return null;
+      if (
+        reaction !== null &&
+        (item.movementOnset === null || item.movementOnset === undefined)
+      )
+        return null;
+      if (reaction !== null && movement !== null) {
+        if (reaction > completion + 2 || movement > completion + 2) return null;
+        if (Math.abs(reaction + movement - completion) > 2) return null;
+      }
+    }
   }
   const metricKeys = Object.keys(freshMetrics()) as (keyof Metrics)[];
   if (
@@ -423,10 +508,9 @@ export function parseRun(value: unknown): RunData | null {
     !Number.isInteger(metrics.longTasks)
   )
     return null;
-  // Schema 2 was emitted once while the package metadata still said 0.1.0.
-  // Normalize that legacy app version on import so exported/re-saved runs use
-  // the current public version without changing their measurement payload.
-  if (v.appVersion === LEGACY_APP_VERSION)
+  // Keep schema-2 runs from earlier app builds importable. Re-saving updates
+  // only appVersion; the measurement payload is left untouched.
+  if (LEGACY_APP_VERSIONS.has(String(v.appVersion)))
     return { ...(value as RunData), appVersion: APP_VERSION };
   return value as RunData;
 }

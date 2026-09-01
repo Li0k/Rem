@@ -56,7 +56,7 @@ const makeRun = (
   return {
     schema: 2,
     app: 'mouse-migration-lab',
-    appVersion: '0.2.0',
+    appVersion: '0.3.0',
     createdAt: '2026-09-01T00:00:00.000Z',
     userAgent: 'assessment-test',
     elapsedMs: options.elapsedMs ?? 5_000,
@@ -128,7 +128,7 @@ describe('run evidence assessment', () => {
     const quality = assessRun(zeroHit);
     expect(quality.hitSamples).toBe(0);
     expect(quality.hardInvalid).toContain(
-      '没有命中样本，无法评估定位时间和路径',
+      '没有命中样本，无法评估单次完成时间和路径',
     );
     expect(
       assessComparison(makeRun(), {

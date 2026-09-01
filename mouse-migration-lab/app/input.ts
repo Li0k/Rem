@@ -77,6 +77,7 @@ type NativeStart = {
   capacity: number;
   epochElapsedMs: number;
   registered: boolean;
+  sessionId: number;
 };
 
 const packetRate = (
@@ -94,8 +95,22 @@ export const nativeFallbackReason = (error: unknown) =>
     512,
   );
 
-const lockPointer = async (canvas: HTMLCanvasElement) => {
+const isNativeCleanupFailure = (error: unknown) =>
+  String(error).toLowerCase().includes('native input cleanup failed');
+
+const lockPointer = async (
+  canvas: HTMLCanvasElement,
+  requestUnadjusted = true,
+) => {
   if (document.pointerLockElement === canvas) return true;
+  if (!requestUnadjusted) {
+    try {
+      await canvas.requestPointerLock();
+      return false;
+    } catch {
+      return null;
+    }
+  }
   try {
     await canvas.requestPointerLock({ unadjustedMovement: true });
     return true;
@@ -238,7 +253,10 @@ export const WINDOWS_NATIVE_INPUT_BACKEND: InputBackend = {
       firstEventMs: null,
       lastEventMs: null,
     };
-    const pointerLocked = await lockPointer(canvas);
+    // WebView2 support for the optional unadjustedMovement request varies.
+    // Native counts are already unadjusted, so preserve the user gesture by
+    // asking only for ordinary cursor capture here.
+    const pointerLocked = await lockPointer(canvas, false);
     if (pointerLocked === null) return null;
 
     let started: NativeStart;
@@ -246,6 +264,13 @@ export const WINDOWS_NATIVE_INPUT_BACKEND: InputBackend = {
     try {
       started = await invoke<NativeStart>('start_native_input');
     } catch (error) {
+      // A failed cleanup means the previous native registration is deliberately
+      // still owned by Rust for retry. Starting a browser session here would
+      // create two input paths, so surface the failure instead of falling back.
+      if (isNativeCleanupFailure(error)) {
+        if (document.pointerLockElement === canvas) document.exitPointerLock();
+        throw new Error(`native cleanup retry required: ${String(error)}`);
+      }
       // Keep the already-acquired lock and its real unadjusted status so the
       // fallback does not need a second user gesture or mislabel adjusted input.
       return createBrowserSession(
@@ -284,6 +309,7 @@ export const WINDOWS_NATIVE_INPUT_BACKEND: InputBackend = {
           // rates a 1024-event batch comfortably spans one display frame.
           const batch = await invoke<NativeBatch>('drain_native_input', {
             limit: 1024,
+            sessionId: started.sessionId,
           });
           applyBatch(batch);
           pending = batch.pending;
@@ -347,7 +373,9 @@ export const WINDOWS_NATIVE_INPUT_BACKEND: InputBackend = {
         cancelAnimationFrame(raf);
         await pumpTask;
         try {
-          const finalBatch = await invoke<NativeBatch>('stop_native_input');
+          const finalBatch = await invoke<NativeBatch>('stop_native_input', {
+            sessionId: started.sessionId,
+          });
           applyBatch(finalBatch);
         } finally {
           releaseLocalResources();
@@ -358,7 +386,7 @@ export const WINDOWS_NATIVE_INPUT_BACKEND: InputBackend = {
         if (released) return;
         finishing = true;
         releaseLocalResources();
-        void invoke('stop_native_input');
+        void invoke('stop_native_input', { sessionId: started.sessionId });
       },
     };
   },

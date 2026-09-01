@@ -73,7 +73,7 @@ export type ComparisonAssessment = {
 const METRIC_LABELS: Record<MetricKey, string> = {
   accuracy: '准确率',
   medianError: '中位角度误差',
-  medianAcquisition: '中位定位时间',
+  medianAcquisition: '中位单次完成时间',
   pathEfficiency: '路径倍率',
 };
 
@@ -143,7 +143,7 @@ export function assessRun(run: RunData): EvidenceQuality {
     else if (clickSamples < ASSESSMENT_THRESHOLDS.minClickSamples)
       warnings.push(`点击样本少于 ${ASSESSMENT_THRESHOLDS.minClickSamples} 次`);
     if (clickSamples > 0 && hitSamples === 0)
-      hardInvalid.push('没有命中样本，无法评估定位时间和路径');
+      hardInvalid.push('没有命中样本，无法评估单次完成时间和路径');
     else if (hitSamples < ASSESSMENT_THRESHOLDS.minHitSamples)
       warnings.push(`命中样本少于 ${ASSESSMENT_THRESHOLDS.minHitSamples} 次`);
   }
@@ -228,12 +228,14 @@ export function assessComparison(
       duration: base.settings.duration,
       fov: base.settings.fov,
       seed: base.settings.seed,
+      timingModel: base.settings.timingModel,
     },
     {
       testMode: candidate.settings.testMode,
       duration: candidate.settings.duration,
       fov: candidate.settings.fov,
       seed: candidate.settings.seed,
+      timingModel: candidate.settings.timingModel,
     },
   );
   const sensitivityChanged =

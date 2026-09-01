@@ -23,10 +23,10 @@ interaction contracts and builds a distinct, device-migration-focused workflow.
 
 ## Experience states
 
-| State | Required experience | Performance rule |
-| --- | --- | --- |
-| Prepare | Large live arena preview, protocol cards, compact calibration dock, recent device profiles | No decorative animation that continuously invalidates the canvas |
-| Train | Arena owns almost the entire viewport; only timer, protocol, capture state, and optional minimal score remain | React updates at most 2 Hz; mouse events never set React state |
+| State   | Required experience                                                                                           | Performance rule                                                 |
+| ------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Prepare | Large live arena preview, protocol cards, compact calibration dock, recent device profiles                    | No decorative animation that continuously invalidates the canvas |
+| Train   | Arena owns almost the entire viewport; only timer, protocol, capture state, and optional minimal score remain | React updates at most 2 Hz; mouse events never set React state   |
 | Results | Clear summary, run health, trajectory/scatter visualization, device context, replay/export and A/B comparison | Charts render only after the run, never over the active hot path |
 
 ## Visual direction
@@ -67,8 +67,10 @@ These requirements are non-negotiable because they define the feel of the tool.
   is drained in batches; overflow is reported as `inputBackend.dropped`.
 - While Windows native input is active, Pointer Lock owns only cursor capture
   and ESC/lost-lock behavior. DOM movement/button events are not consumed, so
-  the same hardware packet cannot be counted twice. `RIDEV_NOLEGACY` exists only
-  between native start/stop and is removed before the window subclass context.
+  the same hardware packet cannot be counted twice. Legacy mouse messages stay
+  enabled because WebView2 uses them for Pointer Lock state. The session
+  snapshots Tao's existing process-wide Raw Input registration and restores it
+  before removing the window subclass.
 - Raw input from multiple mouse `hDevice` values is intentionally aggregated
   into one count stream for the active run; absolute packets are excluded.
 - Web/macOS and unavailable Windows native startup use browser Pointer Lock,
@@ -77,21 +79,23 @@ These requirements are non-negotiable because they define the feel of the tool.
 - Targets and arena geometry share fixed world coordinates. Camera motion must
   never mutate target positions.
 - Hit tests use spherical angular distance, not independent 2D yaw/pitch error.
+- Concurrent targets maintain angular clearance greater than both visible radii
+  plus a safety gap, so respawns cannot overlap another live target.
 - Arena grid is procedural or sufficiently tiled and distance-faded so no edge
   can enter the camera frustum during normal play.
 - Training overlays must not intercept pointer input.
 
 ## Test protocols
 
-| Protocol | MVP behavior | Primary evidence |
-| --- | --- | --- |
-| Four target | Four medium fixed targets; hit target respawns in the calibrated wall region | First-shot accuracy, acquisition, path efficiency |
+| Protocol           | MVP behavior                                                                                           | Primary evidence                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| Four target        | Four medium fixed targets; hit target respawns in the calibrated wall region                           | First-shot accuracy, acquisition, path efficiency        |
 | Character tracking | One readable humanoid/capsule target with lateral strafe and bounded jump behavior; hold fire to track | Crosshair coverage, reacquisition, direction-change loss |
-| Three target | Three small distant targets distributed across a wide field | Wide transfer error and speed |
-| Single chain | One small target; immediate deterministic respawn after a hit | Throughput, miss rate, angular error |
-| Reflex single | Randomized appearance delay; premature shot is recorded; deterministic from seed | Reaction time and first-shot error |
-| Micro adjust | Small targets close to center with low angular separation | Fine correction error and overshoot |
-| Angle hold | Target peeks from a real occluder at varied side/distance; hit changes the next pattern | Hold stability and reaction after reveal |
+| Three target       | Three small distant targets distributed across a wide field                                            | Wide transfer error and speed                            |
+| Single chain       | One small target; immediate deterministic respawn after a hit                                          | Throughput, miss rate, angular error                     |
+| Reflex single      | Randomized appearance delay; premature shot is recorded; deterministic from seed                       | Reaction time and first-shot error                       |
+| Micro adjust       | Small targets close to center with low angular separation                                              | Fine correction error and overshoot                      |
+| Angle hold         | Target peeks from a real occluder at varied side/distance; hit changes the next pattern                | Hold stability and reaction after reveal                 |
 
 Every protocol must be deterministic for the same seed and configuration. A
 protocol may have a distinct arena treatment, but it must use the same camera and
@@ -125,13 +129,16 @@ replay the same visible target/camera history.
 The MVP does not automatically prescribe a new sensitivity. It provides a
 scientific comparison surface:
 
-- headline: accuracy/coverage, acquisition or reaction, median angular error,
+- headline: accuracy/coverage, single-attempt completion, median angular error,
   and path efficiency;
 - health: FPS, p50/p95/p99 frame time, severe-frame ratio, input event rate,
   and long tasks;
 - spatial evidence: click-error scatter or tracking error over time;
 - movement evidence: angular path over time and overshoot/reversal markers when
   available;
+- human-readable single-run diagnosis for static click protocols: clear
+  overshoot/undershoot tendency, meaningful correction count, observed first
+  target-circle entry, and the no-input interval before clicking;
 - A/B comparison: select two compatible runs and show absolute values and
   percentage deltas with device/profile labels;
 - a run is marked non-comparable when protocol, duration, FOV, or seed contract
@@ -148,6 +155,13 @@ scientific comparison surface:
   different sensitivities and an unambiguous better/worse result receive the
   conservative copy “当前证据更支持已测试的 X sensitivity”; the MVP does not
   claim an optimum.
+- New runs carry `timingModel: dual-v2`: each click has an attempt anchor;
+  multi-target rounds use round start then the previous click, refreshed
+  single-target protocols use spawn/refresh, and hold uses its latest reveal
+  cue. Reaction/selection time is anchor to effective movement onset, movement
+  time is onset to hit, and completion is anchor to hit. Exposure age is
+  diagnostic only. Legacy schema-2 and obsolete dual-v1 runs are incompatible
+  with v2 comparison; reflex remains spawn-to-hit.
 
 ## Performance acceptance
 
@@ -202,8 +216,8 @@ the mouse's hardware polling rate.
    ambiguous. A `browser-pointer-lock` result is an explicit fallback; inspect
    `fallbackReason` and do not claim that run proved WM_INPUT.
 5. Press ESC during a second short run, then start again. The new session must
-   begin with reset counters and continue receiving packets, proving scoped
-   `RIDEV_NOLEGACY` registration and cleanup.
+   begin with reset counters and continue receiving packets, proving that the
+   session-specific Raw Input registration and Tao restoration both clean up.
 
 ## Non-goals for this MVP
 

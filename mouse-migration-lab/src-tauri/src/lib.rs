@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 #[cfg(windows)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
 use std::time::Instant;
 use std::{
     collections::{HashSet, VecDeque},
@@ -153,13 +155,16 @@ struct NativeInputStart {
     capacity: usize,
     epoch_elapsed_ms: f64,
     registered: bool,
+    session_id: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct NativeInputManager {
-    queue: Mutex<Option<Arc<Mutex<EventQueue>>>>,
+    queue: Arc<Mutex<Option<(u64, Arc<Mutex<EventQueue>>)>>>,
     #[cfg(windows)]
-    hook: Mutex<Option<windows_input::WindowsHook>>,
+    hook: Arc<Mutex<Option<(u64, windows_input::WindowsHook)>>>,
+    #[cfg(windows)]
+    generation: Arc<AtomicU64>,
 }
 
 #[cfg(windows)]
@@ -170,8 +175,9 @@ mod windows_input {
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
         UI::{
             Input::{
-                GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT,
-                RAWINPUTDEVICE, RIDEV_NOLEGACY, RIDEV_REMOVE, RID_INPUT, RIM_TYPEMOUSE,
+                GetRawInputData, GetRegisteredRawInputDevices, RegisterRawInputDevices, HRAWINPUT,
+                MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RIDEV_REMOVE, RID_INPUT,
+                RIM_TYPEMOUSE,
             },
             Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::{
@@ -190,9 +196,48 @@ mod windows_input {
         epoch: Instant,
     }
 
+    struct PreviousMouseRegistration {
+        flags: u32,
+        hwnd_target: isize,
+    }
+
     pub(super) struct WindowsHook {
         hwnd: isize,
         context: Option<Box<HookContext>>,
+        previous_registration: Option<PreviousMouseRegistration>,
+    }
+
+    fn current_mouse_registration() -> Result<Option<PreviousMouseRegistration>, String> {
+        let item_size = size_of::<RAWINPUTDEVICE>() as u32;
+        let mut count = 0;
+        let first =
+            unsafe { GetRegisteredRawInputDevices(std::ptr::null_mut(), &mut count, item_size) };
+        if first == u32::MAX {
+            return Err(format!(
+                "GetRegisteredRawInputDevices(size) failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if count == 0 {
+            return Ok(None);
+        }
+        let mut devices = vec![unsafe { std::mem::zeroed::<RAWINPUTDEVICE>() }; count as usize];
+        let copied =
+            unsafe { GetRegisteredRawInputDevices(devices.as_mut_ptr(), &mut count, item_size) };
+        if copied == u32::MAX {
+            return Err(format!(
+                "GetRegisteredRawInputDevices(data) failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(devices
+            .into_iter()
+            .take(copied as usize)
+            .find(|device| device.usUsagePage == 0x01 && device.usUsage == 0x02)
+            .map(|device| PreviousMouseRegistration {
+                flags: device.dwFlags,
+                hwnd_target: device.hwndTarget as isize,
+            }))
     }
 
     // The callback never owns dwrefdata. WindowsHook keeps the Box alive until
@@ -273,6 +318,10 @@ mod windows_input {
         hwnd: HWND,
         queue: Arc<Mutex<EventQueue>>,
     ) -> Result<WindowsHook, String> {
+        // Tao already owns the process-wide mouse Raw Input registration.
+        // Windows keeps only the most recent registration per device class, so
+        // this must be restored when the measurement session ends.
+        let previous_registration = current_mouse_registration()?;
         let context = Box::new(HookContext {
             queue,
             epoch: Instant::now(),
@@ -287,10 +336,10 @@ mod windows_input {
         let device = RAWINPUTDEVICE {
             usUsagePage: 0x01,
             usUsage: 0x02,
-            // NOLEGACY is deliberately scoped to start/stop. Pointer Lock has
-            // already been acquired, and JS does not consume legacy DOM mouse
-            // events while this registration exists.
-            dwFlags: RIDEV_NOLEGACY,
+            // Do not suppress legacy messages: WebView2 still uses them for
+            // Pointer Lock/capture state. JS has no DOM mouse listeners in the
+            // native session, so those messages cannot be double-counted.
+            dwFlags: 0,
             hwndTarget: hwnd,
         };
         if unsafe { RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) } == 0 {
@@ -311,6 +360,7 @@ mod windows_input {
         Ok(WindowsHook {
             hwnd: hwnd as isize,
             context: Some(context),
+            previous_registration,
         })
     }
 
@@ -321,72 +371,94 @@ mod windows_input {
             })
         }
 
-        fn cleanup(&mut self) {
-            let Some(context) = self.context.take() else {
-                return;
-            };
+        pub(super) fn cleanup(&mut self) -> Result<(), String> {
+            if self.context.is_none() {
+                return Ok(());
+            }
             let hwnd = self.hwnd as HWND;
-            // RIDEV_REMOVE requires a null hwndTarget. Stop routing WM_INPUT
-            // before removing the callback and freeing its context.
-            let remove = RAWINPUTDEVICE {
-                usUsagePage: 0x01,
-                usUsage: 0x02,
-                dwFlags: RIDEV_REMOVE,
-                hwndTarget: std::ptr::null_mut(),
+            // Stop routing WM_INPUT to this HWND before removing the callback.
+            // Restore Tao's process-wide registration when one existed. Keep
+            // both resources owned by this hook on failure so a later stop or
+            // startup attempt can retry instead of silently losing the prior
+            // registration.
+            let registration = self.previous_registration.as_ref().map_or(
+                RAWINPUTDEVICE {
+                    usUsagePage: 0x01,
+                    usUsage: 0x02,
+                    dwFlags: RIDEV_REMOVE,
+                    hwndTarget: std::ptr::null_mut(),
+                },
+                |previous| RAWINPUTDEVICE {
+                    usUsagePage: 0x01,
+                    usUsage: 0x02,
+                    dwFlags: previous.flags,
+                    hwndTarget: previous.hwnd_target as HWND,
+                },
+            );
+            let restored = unsafe {
+                RegisterRawInputDevices(&registration, 1, size_of::<RAWINPUTDEVICE>() as u32)
             };
-            unsafe {
-                RegisterRawInputDevices(&remove, 1, size_of::<RAWINPUTDEVICE>() as u32);
+            if restored == 0 {
+                return Err(format!(
+                    "RegisterRawInputDevices restore failed: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
             let removed =
                 unsafe { RemoveWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID) } != 0;
             if !removed {
-                // A leaked context is preferable to freeing dwrefdata while an
-                // unexpected live subclass could still call it.
-                Box::leak(context);
+                return Err(format!(
+                    "RemoveWindowSubclass failed: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
+            self.context.take();
+            self.previous_registration.take();
+            Ok(())
         }
     }
 
     impl Drop for WindowsHook {
         fn drop(&mut self) {
-            self.cleanup();
+            if let Err(error) = self.cleanup() {
+                eprintln!("native input cleanup failed: {error}");
+            }
         }
-    }
-
-    pub(super) fn uninstall(mut hook: WindowsHook) {
-        hook.cleanup();
     }
 }
 
 #[cfg(windows)]
-#[tauri::command]
-fn start_native_input(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, NativeInputManager>,
+fn start_native_input_on_window_thread(
+    window: &tauri::WebviewWindow,
+    manager: &NativeInputManager,
 ) -> Result<NativeInputStart, String> {
-    let mut hook = state
+    let mut hook = manager
         .hook
         .lock()
         .map_err(|_| "native input state poisoned")?;
-    if let Some(stale) = hook.take() {
-        windows_input::uninstall(stale);
-        state
-            .queue
-            .lock()
-            .map_err(|_| "native input state poisoned")?
-            .take();
+    if let Some((_, stale)) = hook.as_mut() {
+        stale
+            .cleanup()
+            .map_err(|error| format!("native input cleanup failed: {error}"))?;
     }
+    hook.take();
+    manager
+        .queue
+        .lock()
+        .map_err(|_| "native input state poisoned")?
+        .take();
+    let session_id = manager.generation.fetch_add(1, Ordering::AcqRel) + 1;
     let queue = Arc::new(Mutex::new(EventQueue::with_capacity(INPUT_QUEUE_CAPACITY)));
     // Tauri's HWND is the actual top-level WebviewWindow HWND. Both the invoke
     // command and the window procedure run on its UI thread.
     let hwnd = window.hwnd().map_err(|error| error.to_string())?.0 as _;
     let installed = windows_input::install(hwnd, Arc::clone(&queue))?;
     let epoch_elapsed_ms = installed.elapsed_ms();
-    *state
+    *manager
         .queue
         .lock()
-        .map_err(|_| "native input state poisoned")? = Some(queue);
-    *hook = Some(installed);
+        .map_err(|_| "native input state poisoned")? = Some((session_id, queue));
+    *hook = Some((session_id, installed));
     Ok(NativeInputStart {
         backend: "windows-wm-input",
         native: true,
@@ -394,12 +466,34 @@ fn start_native_input(
         capacity: INPUT_QUEUE_CAPACITY,
         epoch_elapsed_ms,
         registered: true,
+        session_id,
     })
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn start_native_input(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, NativeInputManager>,
+) -> Result<NativeInputStart, String> {
+    let manager = state.inner().clone();
+    let task_window = window.clone();
+    let (sender, mut receiver) = tauri::async_runtime::channel(1);
+    window
+        .run_on_main_thread(move || {
+            let result = start_native_input_on_window_thread(&task_window, &manager);
+            let _ = sender.blocking_send(result);
+        })
+        .map_err(|error| format!("failed to schedule native input start: {error}"))?;
+    receiver
+        .recv()
+        .await
+        .ok_or_else(|| "native input start task was cancelled".to_string())?
 }
 
 #[cfg(not(windows))]
 #[tauri::command]
-fn start_native_input(
+async fn start_native_input(
     _window: tauri::WebviewWindow,
     _state: tauri::State<'_, NativeInputManager>,
 ) -> Result<NativeInputStart, String> {
@@ -409,45 +503,91 @@ fn start_native_input(
 #[tauri::command]
 fn drain_native_input(
     state: tauri::State<'_, NativeInputManager>,
+    session_id: u64,
     limit: Option<usize>,
 ) -> Result<NativeInputBatch, String> {
     let queue = state
         .queue
         .lock()
         .map_err(|_| "native input state poisoned")?;
-    let queue = queue.as_ref().ok_or("native input is not active")?;
+    let (active_session, queue) = queue.as_ref().ok_or("native input is not active")?;
+    if *active_session != session_id {
+        return Err(format!(
+            "native input session mismatch: requested {session_id}, active {active_session}"
+        ));
+    }
     let mut queue = queue.lock().map_err(|_| "native input queue poisoned")?;
     Ok(queue.drain(limit.unwrap_or(MAX_DRAIN_BATCH).clamp(1, MAX_DRAIN_BATCH)))
 }
 
 #[cfg(windows)]
-#[tauri::command]
-fn stop_native_input(
-    state: tauri::State<'_, NativeInputManager>,
+fn stop_native_input_on_window_thread(
+    manager: &NativeInputManager,
+    session_id: u64,
 ) -> Result<NativeInputBatch, String> {
-    let hook = state
+    let mut hook = manager
         .hook
         .lock()
-        .map_err(|_| "native input state poisoned")?
-        .take();
-    if let Some(hook) = hook {
-        windows_input::uninstall(hook);
+        .map_err(|_| "native input state poisoned")?;
+    let active_session = hook
+        .as_ref()
+        .map(|(active_session, _)| *active_session)
+        .ok_or("native input is not active")?;
+    if active_session != session_id {
+        return Err(format!(
+            "native input session mismatch: requested {session_id}, active {active_session}"
+        ));
     }
-    let queue = state
+    if let Some((_, active_hook)) = hook.as_mut() {
+        active_hook.cleanup()?;
+    }
+    hook.take();
+    let mut queue = manager
         .queue
         .lock()
-        .map_err(|_| "native input state poisoned")?
-        .take()
-        .ok_or("native input is not active")?;
+        .map_err(|_| "native input state poisoned")?;
+    let active_session = queue
+        .as_ref()
+        .map(|(active_session, _)| *active_session)
+        .ok_or("native input queue is not active")?;
+    if active_session != session_id {
+        return Err(format!(
+            "native input queue session mismatch: requested {session_id}, active {active_session}"
+        ));
+    }
+    let (_, queue) = queue.take().expect("active queue checked above");
     let mut queue = queue.lock().map_err(|_| "native input queue poisoned")?;
     let remaining = queue.events.len();
     Ok(queue.drain(remaining))
 }
 
+#[cfg(windows)]
+#[tauri::command]
+async fn stop_native_input(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, NativeInputManager>,
+    session_id: u64,
+) -> Result<NativeInputBatch, String> {
+    let manager = state.inner().clone();
+    let (sender, mut receiver) = tauri::async_runtime::channel(1);
+    window
+        .run_on_main_thread(move || {
+            let result = stop_native_input_on_window_thread(&manager, session_id);
+            let _ = sender.blocking_send(result);
+        })
+        .map_err(|error| format!("failed to schedule native input stop: {error}"))?;
+    receiver
+        .recv()
+        .await
+        .ok_or_else(|| "native input stop task was cancelled".to_string())?
+}
+
 #[cfg(not(windows))]
 #[tauri::command]
-fn stop_native_input(
+async fn stop_native_input(
+    _window: tauri::WebviewWindow,
     _state: tauri::State<'_, NativeInputManager>,
+    _session_id: u64,
 ) -> Result<NativeInputBatch, String> {
     Err("WM_INPUT is only available on Windows".into())
 }

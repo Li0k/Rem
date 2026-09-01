@@ -1,4 +1,12 @@
-import { BarChart3, Check, CircleHelp, Gauge, ShieldCheck } from 'lucide-react';
+import { useMemo } from 'react';
+import {
+  Activity,
+  BarChart3,
+  Check,
+  CircleHelp,
+  Gauge,
+  ShieldCheck,
+} from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -16,6 +24,16 @@ import {
   type EvidenceQuality,
 } from './assessment';
 import type { RunData } from './schema';
+import {
+  diagnoseRun,
+  RUN_DIAGNOSTIC_THRESHOLDS,
+  type RunDiagnostics,
+} from './run-diagnostics';
+import {
+  medianTiming,
+  supportsAttemptTiming,
+  timingModelForRun,
+} from './timing';
 
 type Comparison = {
   other: RunData;
@@ -55,6 +73,12 @@ export default function ResultEvidence({
   const device = run.settings.device;
   const candidates = history.filter((item) => item.createdAt !== run.createdAt);
   const quality = assessRun(run);
+  const motionDiagnosis = useMemo(() => diagnoseRun(run), [run]);
+  const timingModel = timingModelForRun(run);
+  const hasAttemptTiming = supportsAttemptTiming(timingModel);
+  const reactionMedian = medianTiming(run.clicks, 'reactionTime');
+  const movementMedian = medianTiming(run.clicks, 'movementTime');
+  const completionMedian = medianTiming(run.clicks, 'completionTime');
   const comparisonAssessment = comparison
     ? assessComparison(run, comparison.other)
     : null;
@@ -70,6 +94,8 @@ export default function ResultEvidence({
         </span>
       </div>
 
+      <MotionDiagnosisPanel diagnosis={motionDiagnosis} />
+
       <div className="grid gap-2 sm:grid-cols-2">
         <EvidenceCell
           label="Device"
@@ -80,6 +106,49 @@ export default function ResultEvidence({
           label="Contract"
           value={protocolFor(run.settings.testMode).name}
           detail={`${run.settings.duration}s · ${run.settings.fov}° H-FOV · ${run.settings.degreesPerCount.toFixed(4)}°/unit · seed ${run.settings.seed}`}
+        />
+        <EvidenceCell
+          label="反应 / 选球"
+          value={
+            hasAttemptTiming
+              ? `${reactionMedian?.toFixed(0) ?? '—'} ms`
+              : timingModel === 'legacy-response'
+                ? `${run.metrics.medianAcquisition.toFixed(0)} ms`
+                : '—'
+          }
+          detail={
+            hasAttemptTiming
+              ? '本次 attempt anchor → 有效移动起手'
+              : timingModel === 'legacy-response'
+                ? 'legacy：目标出现/刷新 → 点击'
+                : '旧 dual-v1：不可与新计时混用'
+          }
+        />
+        <EvidenceCell
+          label="移动时间"
+          value={
+            hasAttemptTiming ? `${movementMedian?.toFixed(0) ?? '—'} ms` : '—'
+          }
+          detail={
+            hasAttemptTiming
+              ? '有效移动起手 → 命中；deadband + idle gap'
+              : '旧数据未记录 movement onset'
+          }
+        />
+        <EvidenceCell
+          label="单次完成"
+          value={
+            hasAttemptTiming
+              ? `${completionMedian?.toFixed(0) ?? '—'} ms`
+              : timingModel === 'legacy-response'
+                ? `${run.metrics.medianAcquisition.toFixed(0)} ms`
+                : '—'
+          }
+          detail={
+            hasAttemptTiming
+              ? 'attempt anchor → 命中；反应 + 移动 ≈ 完成'
+              : 'legacy acquisition；仅同语义 run 可比较'
+          }
         />
         {run.settings.inputBackend?.diagnostics && (
           <EvidenceCell
@@ -105,39 +174,47 @@ export default function ResultEvidence({
             >
               <defs>
                 <linearGradient id="yawFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#ff4f98" stopOpacity={0.28} />
-                  <stop offset="100%" stopColor="#ff4f98" stopOpacity={0} />
+                  <stop
+                    offset="0%"
+                    stopColor="var(--color-pink)"
+                    stopOpacity={0.28}
+                  />
+                  <stop
+                    offset="100%"
+                    stopColor="var(--color-pink)"
+                    stopOpacity={0}
+                  />
                 </linearGradient>
               </defs>
               <CartesianGrid
-                stroke="#d4b3c4"
+                stroke="var(--color-pink-soft)"
                 strokeDasharray="2 3"
                 vertical={false}
               />
               <XAxis
                 dataKey="time"
-                tick={{ fill: '#76566c', fontSize: 9 }}
+                tick={{ fill: 'var(--color-muted-foreground)', fontSize: 9 }}
                 axisLine={false}
                 tickLine={false}
               />
               <YAxis
-                tick={{ fill: '#76566c', fontSize: 9 }}
+                tick={{ fill: 'var(--color-muted-foreground)', fontSize: 9 }}
                 axisLine={false}
                 tickLine={false}
               />
               <Tooltip
                 contentStyle={{
-                  background: '#fff8fb',
-                  border: '2px solid #6f234e',
+                  background: 'var(--color-card)',
+                  border: '2px solid var(--color-plum)',
                   borderRadius: 0,
                   fontSize: 10,
-                  color: '#3d1830',
+                  color: 'var(--color-foreground)',
                 }}
               />
               <Area
                 type="monotone"
                 dataKey="yaw"
-                stroke="#ff4f98"
+                stroke="var(--color-pink)"
                 fill="url(#yawFill)"
                 strokeWidth={1.5}
                 dot={false}
@@ -145,7 +222,7 @@ export default function ResultEvidence({
               <Area
                 type="monotone"
                 dataKey="pitch"
-                stroke="#5b4acb"
+                stroke="var(--color-indigo)"
                 fill="none"
                 strokeWidth={1.15}
                 dot={false}
@@ -206,7 +283,7 @@ export default function ResultEvidence({
                     inverse
                   />
                   <Delta
-                    label="定位时间"
+                    label="单次完成"
                     value={comparison.deltas?.medianAcquisitionPct ?? 0}
                     inverse
                   />
@@ -231,6 +308,133 @@ export default function ResultEvidence({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function MotionDiagnosisPanel({ diagnosis }: { diagnosis: RunDiagnostics }) {
+  if (
+    diagnosis.status === 'not-applicable' ||
+    diagnosis.status === 'insufficient'
+  )
+    return (
+      <div className="border-2 border-plum/40 bg-white/75 p-4">
+        <div className="flex items-center gap-2 font-pixel text-[8px] uppercase text-plum">
+          <Activity className="size-3.5" /> 这轮你怎么打的
+        </div>
+        <p className="mt-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
+          {diagnosis.note}
+        </p>
+      </div>
+    );
+
+  const overRate = diagnosis.overshoot.rate ?? 0;
+  const underRate = diagnosis.undershoot.rate ?? 0;
+  const enough = diagnosis.analyzedAttempts >= 3;
+  const tendency = !enough
+    ? '样本还少，先把下面的数据当作单轮观察'
+    : overRate - underRate >= 0.1
+      ? '本轮更偏过冲：准心越过目标圈后又拉了回来'
+      : underRate - overRate >= 0.1
+        ? '本轮更偏欠冲：点击时准心经常还没走够'
+        : '本轮没有明显的单边过冲或欠冲倾向';
+  const correctionText =
+    diagnosis.corrections.median === null
+      ? '—'
+      : `${diagnosis.corrections.median.toFixed(0)} 次`;
+  const pauseText =
+    diagnosis.pause.medianMs === null
+      ? '—'
+      : `${diagnosis.pause.medianMs.toFixed(0)} ms`;
+  const arrivalText =
+    diagnosis.arrival.medianMs === null
+      ? '—'
+      : `${diagnosis.arrival.medianMs.toFixed(0)} ms`;
+
+  return (
+    <div className="border-2 border-plum/60 bg-pink-soft/30 p-4 shadow-[4px_4px_0_0_var(--color-pink-soft)]">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="flex items-center gap-2 font-pixel text-[8px] uppercase text-plum">
+          <Activity className="size-3.5" /> 这轮你怎么打的
+        </span>
+        <span className="font-mono text-[9px] text-muted-foreground">
+          已分析 {diagnosis.analyzedAttempts}/{diagnosis.attempts} 次点击
+        </span>
+      </div>
+      <p className="mt-3 border-l-2 border-pink pl-3 font-mono text-[12px] font-semibold leading-relaxed text-plum">
+        {tendency}
+      </p>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+        <HumanMetric
+          label="明显过冲"
+          value={`${diagnosis.overshoot.count}/${diagnosis.analyzedAttempts}`}
+          detail={
+            diagnosis.overshoot.median === null
+              ? '没有越过目标圈'
+              : `中位多走 ${diagnosis.overshoot.median.toFixed(2)}°`
+          }
+        />
+        <HumanMetric
+          label="明显欠冲"
+          value={`${diagnosis.undershoot.count}/${diagnosis.analyzedAttempts}`}
+          detail={
+            diagnosis.undershoot.median === null
+              ? '没有明显少走'
+              : `中位少走 ${diagnosis.undershoot.median.toFixed(2)}°`
+          }
+        />
+        <HumanMetric
+          label="二次修正"
+          value={correctionText}
+          detail={
+            diagnosis.corrections.p75 === null
+              ? '静态目标才会判定'
+              : `P75 ${diagnosis.corrections.p75.toFixed(0)} 次`
+          }
+        />
+        <HumanMetric
+          label="首次进圈"
+          value={arrivalText}
+          detail={`${diagnosis.arrival.sampled}/${diagnosis.analyzedAttempts} 次有轨迹证据`}
+        />
+        <HumanMetric
+          label="点击前停顿"
+          value={pauseText}
+          detail={
+            diagnosis.pause.overThresholdRate === null
+              ? '没有足够样本'
+              : `>${RUN_DIAGNOSTIC_THRESHOLDS.pauseMs}ms 占 ${(diagnosis.pause.overThresholdRate * 100).toFixed(0)}%`
+          }
+        />
+      </div>
+      <p className="mt-3 font-mono text-[8px] leading-relaxed text-muted-foreground">
+        {diagnosis.note}
+        。单轮倾向不能直接证明灵敏度过高或过低；换鼠标时应比较相同协议的多轮结果。
+      </p>
+    </div>
+  );
+}
+
+function HumanMetric({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div className="border-2 border-plum/35 bg-white/85 p-3">
+      <span className="font-mono text-[9px] text-muted-foreground">
+        {label}
+      </span>
+      <strong className="mt-1 block font-mono text-lg text-plum">
+        {value}
+      </strong>
+      <small className="mt-1 block font-mono text-[8px] leading-relaxed text-muted-foreground">
+        {detail}
+      </small>
     </div>
   );
 }

@@ -35,6 +35,10 @@ import {
   comparisonDeltas,
   countAbove,
   degreesPerCount,
+  attemptPathEfficiency,
+  applyMovingTargetState,
+  findAngularClearance,
+  hasAngularClearance,
   median,
   mulberry32,
   protocolFor,
@@ -60,7 +64,12 @@ import {
   type Metrics,
   type RunData,
 } from './schema';
-import { INPUT_BACKEND, type InputDiagnostics } from './input';
+import {
+  INPUT_BACKEND,
+  type InputDiagnostics,
+  type InputSession,
+} from './input';
+import { deriveAttemptTiming, DUAL_TIMING_MODEL } from './timing';
 
 const ResultEvidence = lazy(() => import('./result-evidence'));
 
@@ -99,7 +108,10 @@ type Runtime = {
   moveCount: number;
   recordingOverflow: boolean;
   inputCount: number;
-  path: number;
+  attemptPath: number;
+  attemptYaw: number;
+  attemptPitch: number;
+  lastAttemptClickAt: number | null;
   lastFrame: number;
   frameHistogram: Uint32Array;
   frameOverflow: number;
@@ -246,8 +258,8 @@ export default function Home() {
             const other = history.find((item) => item.createdAt === compareId);
             if (!other) return null;
             const compatibility = comparisonCompatibility(
-              run.settings,
-              other.settings,
+              { ...run.settings, timingModel: run.settings.timingModel },
+              { ...other.settings, timingModel: other.settings.timingModel },
             );
             return {
               other,
@@ -509,6 +521,7 @@ export default function Home() {
       fov: 103,
       testMode: selectedMode,
       valorantSensitivity,
+      timingModel: DUAL_TIMING_MODEL,
       gameMapping: {
         profile: 'valorant',
         yawDegrees,
@@ -560,7 +573,10 @@ export default function Home() {
       moveCount: 0,
       recordingOverflow: false,
       inputCount: 0,
-      path: 0,
+      attemptPath: 0,
+      attemptYaw: 0,
+      attemptPitch: 0,
+      lastAttemptClickAt: null,
       lastFrame: 0,
       frameHistogram: new Uint32Array(128),
       frameOverflow: 0,
@@ -588,7 +604,11 @@ export default function Home() {
           [4.5, -1],
         ],
       };
-    const spawn = (now: number, slot: number) => {
+    const spawn = (
+      now: number,
+      slot: number,
+      fallback?: readonly [number, number],
+    ) => {
       const preset =
         rt.nextTargetId < activeProtocol.targetCount
           ? initialPositions[selectedMode]?.[slot]
@@ -596,15 +616,60 @@ export default function Home() {
       let yaw = preset?.[0] ?? 0;
       let pitch = preset?.[1] ?? 0;
       if (!preset) {
-        if (selectedMode === 'micro') {
-          yaw = (random() * 2 - 1) * 6;
-          pitch = (random() * 2 - 1) * 3.2;
-        } else if (selectedMode === 'tracking' || selectedMode === 'hold') {
-          yaw = 0;
-          pitch = selectedMode === 'hold' ? 1.8 : 0;
-        } else {
-          yaw = (random() * 2 - 1) * 27;
-          pitch = (random() * 2 - 1) * 11;
+        const occupied = rt.active.map((target) => ({
+          yaw: target.yaw,
+          pitch: target.pitch,
+          radius: target.record.radius,
+        }));
+        let separated = false;
+        for (let attempt = 0; attempt < 48; attempt += 1) {
+          if (selectedMode === 'micro') {
+            yaw = (random() * 2 - 1) * 6;
+            pitch = (random() * 2 - 1) * 3.2;
+          } else if (selectedMode === 'tracking' || selectedMode === 'hold') {
+            yaw = 0;
+            pitch = selectedMode === 'hold' ? 1.8 : 0;
+          } else {
+            yaw = (random() * 2 - 1) * 27;
+            pitch = (random() * 2 - 1) * 11;
+          }
+          if (
+            hasAngularClearance(
+              { yaw, pitch, radius: activeProtocol.radius },
+              occupied,
+            )
+          ) {
+            separated = true;
+            break;
+          }
+        }
+        if (!separated) {
+          const bounds =
+            selectedMode === 'micro'
+              ? { yaw: [-6, 6] as const, pitch: [-3.2, 3.2] as const }
+              : { yaw: [-27, 27] as const, pitch: [-11, 11] as const };
+          const safe = findAngularClearance(
+            occupied,
+            activeProtocol.radius,
+            bounds,
+          );
+          if (safe) [yaw, pitch] = safe;
+          else if (
+            fallback &&
+            hasAngularClearance(
+              {
+                yaw: fallback[0],
+                pitch: fallback[1],
+                radius: activeProtocol.radius,
+              },
+              occupied,
+            )
+          )
+            [yaw, pitch] = fallback;
+          else {
+            setError('当前可见目标空间不足，已跳过重叠刷新');
+            return null;
+          }
         }
       }
       const record = spawnTarget(
@@ -635,7 +700,7 @@ export default function Home() {
             ? 'person'
             : 'sphere',
         slot,
-        visible: true,
+        visible: selectedMode !== 'hold',
       };
       if (selectedMode === 'tracking' || selectedMode === 'hold') {
         record.behavior = selectedMode;
@@ -688,7 +753,14 @@ export default function Home() {
           target.pitch = target.basePitch;
           // The middle cover is opaque: the target is only hittable after it
           // has committed to a side peek, then changes side/distance on hit.
+          const wasVisible = target.visible;
           target.visible = Math.abs(target.yaw) > 5.5;
+          if (!wasVisible && target.visible) {
+            target.record.revealAt = elapsed;
+            rt.attemptPath = 0;
+            rt.attemptYaw = rt.yaw;
+            rt.attemptPitch = rt.pitch;
+          }
         }
       }
     };
@@ -716,33 +788,75 @@ export default function Home() {
       updateTargets(now);
       const { target, error: angularError } = nearest();
       const hit = Boolean(target && angularError <= target.record.radius);
+      const persistentRound =
+        selectedMode === 'four' ||
+        selectedMode === 'three' ||
+        selectedMode === 'micro';
+      const anchorTime = persistentRound
+        ? (rt.lastAttemptClickAt ?? 0)
+        : (target?.record.revealAt ?? target?.record.spawn ?? now);
+      const timing = target
+        ? deriveAttemptTiming(
+            {
+              t: rt.moveT.subarray(0, rt.moveCount),
+              dx: rt.moveDx.subarray(0, rt.moveCount),
+              dy: rt.moveDy.subarray(0, rt.moveCount),
+            },
+            anchorTime,
+            now,
+            target.record.spawn,
+            { degreesPerCount: settings.degreesPerCount },
+          )
+        : null;
       rt.clicks.push({
         t: now,
         targetId: target?.record.id ?? -1,
         hit,
         error: Number.isFinite(angularError) ? angularError : 180,
-        acquisition: target ? now - target.record.spawn : 0,
+        acquisition: timing?.completionTime ?? 0,
+        attemptAnchor: timing?.anchorTime,
+        movementOnset: timing?.movementOnset,
+        reactionTime: timing?.reactionTime,
+        movementTime: timing?.movementTime,
+        completionTime: timing?.completionTime,
+        exposureAge: timing?.exposureAge,
         pathEfficiency: target
-          ? rt.path / Math.max(0.001, target.record.idealDistance)
+          ? attemptPathEfficiency(
+              rt.attemptPath,
+              rt.attemptYaw,
+              rt.attemptPitch,
+              target.yaw,
+              target.pitch,
+            )
           : 0,
       });
+      if (persistentRound || target) rt.lastAttemptClickAt = now;
+      rt.attemptPath = 0;
+      rt.attemptYaw = rt.yaw;
+      rt.attemptPitch = rt.pitch;
       if (!hit || !target) return;
       target.record.despawn = now;
       const index = rt.active.indexOf(target);
       if (index >= 0) rt.active.splice(index, 1);
-      rt.path = 0;
       if (selectedMode === 'reflex')
         rt.nextReflexAt = now + 550 + random() * 1550;
       else {
-        const next = spawn(now, target.slot);
+        const next = spawn(now, target.slot, [target.yaw, target.pitch]);
+        if (!next) return;
         if (selectedMode === 'hold') {
           next.direction = random() < 0.5 ? -1 : 1;
           next.distance = targetDistance('hold', random());
+          applyMovingTargetState(
+            next.record,
+            next.direction as -1 | 1,
+            next.distance,
+          );
         }
       }
     };
     const onMove = (dx: number, dy: number, timestamp: number) => {
       if (rt.mode === 'stopped') return;
+      if (timestamp < rt.start) return;
       if (rt.moveCount >= capacity) {
         rt.recordingOverflow = true;
         setError('记录缓冲已满，运行已停止');
@@ -751,7 +865,7 @@ export default function Home() {
       }
       rt.yaw = wrapDegrees(rt.yaw - dx * settings.degreesPerCount);
       rt.pitch = clamp(rt.pitch - dy * settings.degreesPerCount, -67.6, 67.6);
-      rt.path += Math.hypot(dx, dy) * settings.degreesPerCount;
+      rt.attemptPath += Math.hypot(dx, dy) * settings.degreesPerCount;
       const index = rt.moveCount++;
       rt.moveT[index] = Math.max(0, timestamp - rt.start);
       rt.moveDx[index] = dx;
@@ -762,19 +876,28 @@ export default function Home() {
       rt.inputCount += 1;
     };
     const onDown = (button: number, timestamp: number) => {
-      if (button !== 0 || rt.mode === 'stopped') return;
+      if (button !== 0 || rt.mode === 'stopped' || timestamp < rt.start) return;
       if (selectedMode === 'tracking') rt.firing = true;
       else shoot(timestamp);
     };
     const onUp = (button: number) => {
       if (button === 0) rt.firing = false;
     };
-    const input = await INPUT_BACKEND.acquire(canvas, {
-      move: onMove,
-      buttonDown: onDown,
-      buttonUp: onUp,
-      lost: () => void stop(),
-    });
+    let input: InputSession | null;
+    try {
+      input = await INPUT_BACKEND.acquire(canvas, {
+        move: onMove,
+        buttonDown: onDown,
+        buttonUp: onUp,
+        lost: () => void stop(),
+      });
+    } catch (inputError) {
+      rt.destroy?.();
+      runtime.current = null;
+      setMode('ready');
+      setError(`原始输入清理失败，请重试：${String(inputError)}`);
+      return;
+    }
     if (!input) {
       rt.destroy?.();
       runtime.current = null;
@@ -787,6 +910,13 @@ export default function Home() {
     rt.inputDiagnostics = input.diagnostics;
     const initialDiagnostics = input.diagnostics();
     setInputDiagnostics(initialDiagnostics);
+    if (
+      initialDiagnostics.fallbackReason &&
+      initialDiagnostics.fallbackReason !== 'not-applicable'
+    )
+      setError(
+        `WM_INPUT 启动失败，已降级为浏览器输入：${initialDiagnostics.fallbackReason}`,
+      );
     rt.settings.inputBackend = {
       id: input.id,
       native: input.native,
@@ -1068,7 +1198,7 @@ export default function Home() {
     .padStart(6, '0');
 
   return (
-    <main className="min-h-screen overflow-x-hidden bg-background bg-[radial-gradient(circle_at_1px_1px,rgba(111,35,78,0.08)_1px,transparent_0)] [background-size:16px_16px] text-foreground selection:bg-pink selection:text-plum">
+    <main className="min-h-screen overflow-x-hidden bg-background bg-[radial-gradient(circle_at_1px_1px,color-mix(in_srgb,var(--color-plum)_8%,transparent)_1px,transparent_0)] [background-size:16px_16px] text-foreground selection:bg-pink selection:text-plum">
       {!lockedView && (
         <header className="relative z-20 border-b-2 border-plum/70 bg-white/85 shadow-[0_4px_0_0_var(--color-pink-soft)] backdrop-blur-md">
           <div className="mx-auto flex h-[74px] max-w-[1720px] items-center justify-between gap-4 px-4 sm:px-6">
@@ -1526,7 +1656,7 @@ export default function Home() {
 
           <div
             className={cn(
-              'relative h-[clamp(430px,64vh,760px)] overflow-hidden border-[3px] border-plum bg-[#d9ced8] shadow-[7px_7px_0_0_var(--color-pink-soft)]',
+              'relative h-[clamp(430px,64vh,760px)] overflow-hidden border-[3px] border-plum bg-arena shadow-[7px_7px_0_0_var(--color-pink-soft)]',
               lockedView && 'h-screen border-0 shadow-none',
             )}
           >
@@ -1543,7 +1673,7 @@ export default function Home() {
             </div>
 
             {mode === 'running' && (
-              <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-4 p-5 text-white [text-shadow:1px_1px_0_#3d1830]">
+              <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-4 p-5 text-white [text-shadow:1px_1px_0_var(--foreground)]">
                 <span className="font-pixel text-[8px] uppercase tracking-[0.08em]">
                   {protocol.name}
                 </span>
@@ -1559,7 +1689,7 @@ export default function Home() {
             )}
 
             {mode === 'running' && inputDiagnostics && (
-              <div className="pointer-events-none absolute bottom-4 left-4 z-30 border border-white/60 bg-plum/70 px-2 py-1 font-mono text-[8px] text-white [text-shadow:1px_1px_0_#3d1830]">
+              <div className="pointer-events-none absolute bottom-4 left-4 z-30 border border-white/60 bg-plum/70 px-2 py-1 font-mono text-[8px] text-white [text-shadow:1px_1px_0_var(--foreground)]">
                 {inputDiagnostics.backend} · packets{' '}
                 {inputDiagnostics.packetCount} · events{' '}
                 {inputDiagnostics.eventCount} (
@@ -1583,17 +1713,17 @@ export default function Home() {
             )}
 
             {mode !== 'running' && mode !== 'replay' && (
-              <div className="absolute inset-0 z-10 grid place-items-center bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.2),rgba(111,35,78,0.08))] p-5">
+              <div className="absolute inset-0 z-10 grid place-items-center bg-[radial-gradient(circle_at_center,color-mix(in_srgb,var(--color-ice)_20%,transparent),color-mix(in_srgb,var(--color-plum)_8%,transparent))] p-5">
                 {mode === 'ready' ? (
                   <button
-                    className="group min-w-[250px] border-[3px] border-plum bg-white/78 px-8 py-8 text-center shadow-[7px_7px_0_0_rgba(111,35,78,0.25)] backdrop-blur-[2px] transition duration-150 hover:-translate-y-1 hover:bg-white/90 hover:shadow-[9px_9px_0_0_rgba(111,35,78,0.32)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-pink/45 active:translate-y-0 active:shadow-[3px_3px_0_0_rgba(111,35,78,0.28)]"
+                    className="group min-w-[250px] border-[3px] border-plum bg-white/78 px-8 py-8 text-center shadow-[7px_7px_0_0_color-mix(in_srgb,var(--color-plum)_25%,transparent)] backdrop-blur-[2px] transition duration-150 hover:-translate-y-1 hover:bg-white/90 hover:shadow-[9px_9px_0_0_color-mix(in_srgb,var(--color-plum)_32%,transparent)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-pink/45 active:translate-y-0 active:shadow-[3px_3px_0_0_color-mix(in_srgb,var(--color-plum)_28%,transparent)]"
                     type="button"
                     onClick={start}
                   >
                     <span className="font-pixel text-[8px] tracking-[0.13em] text-plum/75">
                       MOUSE MIGRATION
                     </span>
-                    <strong className="my-4 flex flex-col items-center gap-3 font-pixel text-[clamp(2.1rem,4.2vw,4rem)] leading-none text-pink [text-shadow:3px_0_0_#7b1f4e,-3px_0_0_#7b1f4e,0_3px_0_#7b1f4e,0_-3px_0_#7b1f4e,5px_5px_0_#fff] transition-transform group-hover:scale-[1.02]">
+                    <strong className="my-4 flex flex-col items-center gap-3 font-pixel text-[clamp(2.1rem,4.2vw,4rem)] leading-none text-pink [text-shadow:3px_0_0_var(--color-plum),-3px_0_0_var(--color-plum),0_3px_0_var(--color-plum),0_-3px_0_var(--color-plum),5px_5px_0_#fff] transition-transform group-hover:scale-[1.02]">
                       <span className="block">PRESS</span>
                       <span className="flex items-center justify-center gap-[0.18em]">
                         START
@@ -1655,8 +1785,12 @@ export default function Home() {
                 value={`${metrics.hits} / ${metrics.misses}`}
               />
               <Metric
-                label="定位时间"
-                value={`${metrics.medianAcquisition.toFixed(0)} ms`}
+                label="单次完成"
+                value={
+                  trackingMode || metrics.hits === 0
+                    ? '—'
+                    : `${metrics.medianAcquisition.toFixed(0)} ms`
+                }
               />
               <Metric
                 label="角度误差"
