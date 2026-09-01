@@ -1,0 +1,54 @@
+@import 'tailwindcss' source(none);
+
+@source '../app';
+@source '../components/ui/button.tsx';
+@source '../components/ui/card.tsx';
+@source '../components/ui/input.tsx';
+@source '../components/ui/label.tsx';
+@source '../components/ui/progress.tsx';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-plum: #6f234e;
+  --color-pink: #ff5a9e;
+  --color-pink-soft: #f6d5e4;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-pixel: var(--font-pixel);
+  --radius-lg: 0.75rem;
+  --radius-md: 0.55rem;
+  --radius-sm: 0.35rem;
+}
+
+:root {
+  --font-geist-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-geist-mono: 'Geist Mono', ui-monospace, monospace;
+  --font-pixel: 'Press Start 2P', ui-monospace, monospace;
+  --background: #f5f0f3;
+  --foreground: #3d1830;
+  --card: #fffafd;
+  --card-foreground: #3d1830;
+  --primary: #ff5a9e;
+  --primary-foreground: #ffffff;
+  --secondary: #f6d5e4;
+  --secondary-foreground: #56203f;
+  --muted: #eadfe6;
+  --muted-foreground: #76566c;
+  --border: #6f234e;
+  --input: #fffdfd;
+  --ring: #ff5a9e;
+}
