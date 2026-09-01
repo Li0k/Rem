@@ -206,6 +206,10 @@ describe('replay primitives', () => {
   it('accepts a valid replay fixture and rejects broken contracts', () => {
     expect(parseRun(validRun())).not.toBeNull();
 
+    const legacyVersion = validRun();
+    legacyVersion.appVersion = '0.1.0';
+    expect(parseRun(legacyVersion)?.appVersion).toBe('0.2.0');
+
     const uneven = validRun();
     uneven.movement.dy.pop();
     expect(parseRun(uneven)).toBeNull();

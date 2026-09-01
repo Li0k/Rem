@@ -62,8 +62,18 @@ These requirements are non-negotiable because they define the feel of the tool.
   rotates pitch; no smoothing, interpolation, acceleration, or CSS transform.
 - Pitch is clamped to approximately `[-67.6°, 67.6°]`; yaw wraps without a
   visible boundary.
-- Pointer Lock requests `unadjustedMovement` and falls back cleanly when the
-  browser does not support it.
+- Windows Tauri uses `RegisterRawInputDevices` + `WM_INPUT` relative mouse
+  packets from the real `WebviewWindow` HWND. A preallocated bounded Rust queue
+  is drained in batches; overflow is reported as `inputBackend.dropped`.
+- While Windows native input is active, Pointer Lock owns only cursor capture
+  and ESC/lost-lock behavior. DOM movement/button events are not consumed, so
+  the same hardware packet cannot be counted twice. `RIDEV_NOLEGACY` exists only
+  between native start/stop and is removed before the window subclass context.
+- Raw input from multiple mouse `hDevice` values is intentionally aggregated
+  into one count stream for the active run; absolute packets are excluded.
+- Web/macOS and unavailable Windows native startup use browser Pointer Lock,
+  request `unadjustedMovement`, and fall back cleanly when unsupported. Exported
+  metadata records the backend, native/unadjusted status, and dropped count.
 - Targets and arena geometry share fixed world coordinates. Camera motion must
   never mutate target positions.
 - Hit tests use spherical angular distance, not independent 2D yaw/pitch error.
@@ -128,7 +138,7 @@ scientific comparison surface:
   is incompatible.
 - Evidence assessment separates hard-invalid runs from readable runs with
   warnings. It checks completion, click and successful-hit sample counts or tracking effective
-  milliseconds, movement events, severe-frame ratio, and long tasks using
+  milliseconds, movement events, native queue drops, severe-frame ratio, and long tasks using
   exported thresholds; it never presents these gates as statistical
   confidence.
 - Compatible A/B runs receive a deterministic metric-level verdict. Accuracy
@@ -141,7 +151,8 @@ scientific comparison surface:
 
 ## Performance acceptance
 
-Validate in a production build in real Chrome with Pointer Lock.
+Validate the web build in real Chrome with Pointer Lock and the Windows desktop
+build on physical Windows hardware with the `windows-wm-input` backend.
 
 - Renderer follows the display refresh cadence on the test machine.
 - At 120 Hz baseline, p50 should remain near one refresh interval and p95 should
@@ -171,6 +182,8 @@ the mouse's hardware polling rate.
   viewport.
 - Perform a real Chrome Pointer Lock run for at least one click protocol and one
   tracking protocol.
+- On physical Windows hardware, confirm `windows-wm-input`, zero dropped events,
+  ESC cleanup, repeated start/stop, mouse buttons, and measured input event rate.
 
 ## Non-goals for this MVP
 
@@ -178,7 +191,8 @@ the mouse's hardware polling rate.
 - User accounts, cloud sync, leaderboards, social features, or deployment.
 - Copying MsLab private scoring, branded assets, source, or exact visual design.
 - A general-purpose scenario editor or community task marketplace.
-- Native raw-HID access outside the browser Pointer Lock contract.
+- Per-device Raw Input selection/identity and direct HID report access beyond
+  the aggregated Windows `WM_INPUT` count stream.
 
 ## Delivery gate
 

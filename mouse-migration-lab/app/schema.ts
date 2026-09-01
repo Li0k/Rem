@@ -1,5 +1,9 @@
 import type { Target, TestMode } from './core';
 
+export const RUN_SCHEMA = 2 as const;
+export const APP_VERSION = '0.2.0' as const;
+const LEGACY_APP_VERSION = '0.1.0';
+
 export type DeviceProfileSnapshot = {
   id: string;
   name: string;
@@ -36,9 +40,9 @@ export type Metrics = {
 };
 
 export type RunData = {
-  schema: 2;
+  schema: typeof RUN_SCHEMA;
   app: 'mouse-migration-lab';
-  appVersion: '0.2.0';
+  appVersion: typeof APP_VERSION;
   createdAt: string;
   userAgent: string;
   elapsedMs: number;
@@ -59,6 +63,7 @@ export type RunData = {
       id: string;
       native: boolean;
       unadjusted: boolean;
+      dropped?: number;
     };
     device?: DeviceProfileSnapshot;
   };
@@ -120,9 +125,9 @@ export function parseRun(value: unknown): RunData | null {
   const finiteArray = (items: unknown, max: number) =>
     Array.isArray(items) && items.length <= max && items.every(finite);
   if (
-    v.schema !== 2 ||
+    v.schema !== RUN_SCHEMA ||
     v.app !== 'mouse-migration-lab' ||
-    v.appVersion !== '0.2.0' ||
+    (v.appVersion !== APP_VERSION && v.appVersion !== LEGACY_APP_VERSION) ||
     typeof v.createdAt !== 'string' ||
     typeof v.userAgent !== 'string' ||
     !finite(elapsedMs) ||
@@ -170,7 +175,11 @@ export function parseRun(value: unknown): RunData | null {
       (!inputBackend ||
         typeof inputBackend.id !== 'string' ||
         typeof inputBackend.native !== 'boolean' ||
-        typeof inputBackend.unadjusted !== 'boolean')) ||
+        typeof inputBackend.unadjusted !== 'boolean' ||
+        (inputBackend.dropped !== undefined &&
+          (!finite(inputBackend.dropped) ||
+            (inputBackend.dropped as number) < 0 ||
+            !Number.isInteger(inputBackend.dropped))))) ||
     (device !== undefined &&
       (!device ||
         typeof device.id !== 'string' ||
@@ -309,5 +318,10 @@ export function parseRun(value: unknown): RunData | null {
     !Number.isInteger(metrics.longTasks)
   )
     return null;
+  // Schema 2 was emitted once while the package metadata still said 0.1.0.
+  // Normalize that legacy app version on import so exported/re-saved runs use
+  // the current public version without changing their measurement payload.
+  if (v.appVersion === LEGACY_APP_VERSION)
+    return { ...(value as RunData), appVersion: APP_VERSION };
   return value as RunData;
 }

@@ -2,6 +2,12 @@ name: Mouse Migration Lab Windows
 
 on:
   workflow_dispatch:
+    inputs:
+      include_msi:
+        description: 'Also build the optional MSI installer (push builds are NSIS-only)'
+        required: true
+        default: false
+        type: boolean
   push:
     paths:
       - 'mouse-migration-lab/**'
@@ -18,25 +24,33 @@ jobs:
         working-directory: mouse-migration-lab
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7.0.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: mouse-migration-lab/package-lock.json
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: mouse-migration-lab/src-tauri -> target
       - name: Install dependencies
         run: npm ci
+      - name: Check formatting
+        run: npm run format -- --check
+      - name: Run tests
+        run: npm test
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npx tsc --noEmit
       - name: Build Windows installers
         uses: tauri-apps/tauri-action@action-v1.0.0
         with:
           projectPath: mouse-migration-lab
           tauriScript: npm run desktop
-          args: --bundles nsis,msi
+          args: "${{ github.event_name == 'workflow_dispatch' && inputs.include_msi && '--bundles nsis,msi' || '--bundles nsis' }}"
           uploadWorkflowArtifacts: true

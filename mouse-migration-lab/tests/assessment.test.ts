@@ -153,6 +153,20 @@ describe('run evidence assessment', () => {
     );
     expect(quality.minimumQuality).toBe(true);
   });
+
+  it('rejects runs whose native input queue dropped events', () => {
+    const run = makeRun();
+    run.settings.inputBackend = {
+      id: 'windows-wm-input',
+      native: true,
+      unadjusted: true,
+      dropped: 3,
+    };
+    const quality = assessRun(run);
+    expect(quality.inputDropped).toBe(3);
+    expect(quality.hardInvalid).toContain('原始输入缓冲丢失 3 个事件');
+    expect(quality.minimumQuality).toBe(false);
+  });
 });
 
 describe('deterministic A/B evidence verdicts', () => {

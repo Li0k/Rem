@@ -33,6 +33,7 @@ export type EvidenceQuality = {
   hitSamples: number;
   trackingEffectiveMs: number;
   inputEvents: number;
+  inputDropped: number;
   frameSamples: number;
   severeRatio: number;
   longTasks: number;
@@ -88,6 +89,7 @@ export function assessRun(run: RunData): EvidenceQuality {
       ? Math.max(0, run.metrics.hits) + Math.max(0, run.metrics.misses)
       : 0;
   const inputEvents = run.movement.t.length;
+  const inputDropped = run.settings.inputBackend?.dropped ?? 0;
   const frameSamples = run.frames.length;
   const severeRatio = run.metrics.severeRatio;
   const longTasks = run.metrics.longTasks;
@@ -97,6 +99,10 @@ export function assessRun(run: RunData): EvidenceQuality {
   if (!completed) hardInvalid.push('运行未完成最低时长');
   if (inputEvents < ASSESSMENT_THRESHOLDS.minInputEvents)
     hardInvalid.push('没有可验证的输入事件');
+  if (!Number.isInteger(inputDropped) || inputDropped < 0)
+    hardInvalid.push('原始输入丢包指标无效');
+  else if (inputDropped > 0)
+    hardInvalid.push(`原始输入缓冲丢失 ${inputDropped} 个事件`);
   if (frameSamples < ASSESSMENT_THRESHOLDS.minFrameSamples)
     hardInvalid.push('没有可验证的帧样本');
 
@@ -151,6 +157,7 @@ export function assessRun(run: RunData): EvidenceQuality {
     hitSamples,
     trackingEffectiveMs,
     inputEvents,
+    inputDropped,
     frameSamples,
     severeRatio,
     longTasks,

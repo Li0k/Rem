@@ -250,6 +250,7 @@ function QualityPanel({ quality }: { quality: EvidenceQuality }) {
       <div className="mt-2 grid gap-1 font-mono text-[9px] sm:grid-cols-2">
         <span>完成度：{quality.completed ? '通过' : '不足'}</span>
         <span>输入事件：{quality.inputEvents}</span>
+        <span>输入丢包：{quality.inputDropped}</span>
         {quality.clickSamples > 0 && (
           <span>点击样本：{quality.clickSamples}</span>
         )}

@@ -53,6 +53,7 @@ import {
   type VisualTarget,
 } from './renderer';
 import {
+  APP_VERSION,
   freshMetrics,
   parseRun,
   type Click,
@@ -103,6 +104,7 @@ type Runtime = {
   frameOverflow: number;
   frameBinMs: number;
   cleanup?: () => void;
+  inputDropped?: () => number;
   destroy?: () => void;
   longTasks: number;
   longTaskObserver?: PerformanceObserver;
@@ -404,6 +406,8 @@ export default function Home() {
     if (!rt || rt.mode !== 'running') return;
     rt.mode = 'stopped';
     cancelAnimationFrame(rt.raf);
+    if (rt.settings.inputBackend)
+      rt.settings.inputBackend.dropped = rt.inputDropped?.() ?? 0;
     rt.cleanup?.();
     rt.longTaskObserver?.disconnect();
     rt.destroy?.();
@@ -413,7 +417,7 @@ export default function Home() {
     const data: RunData = {
       schema: 2,
       app: 'mouse-migration-lab',
-      appVersion: '0.2.0',
+      appVersion: APP_VERSION,
       createdAt: new Date().toISOString(),
       userAgent: navigator.userAgent,
       elapsedMs: elapsed,
@@ -668,9 +672,9 @@ export default function Home() {
       }
       return { target: best, error };
     };
-    const shoot = () => {
+    const shoot = (timestamp = performance.now()) => {
       if (rt.mode !== 'running') return;
-      const now = performance.now() - rt.start;
+      const now = Math.max(0, timestamp - rt.start);
       updateTargets(now);
       const { target, error: angularError } = nearest();
       const hit = Boolean(target && angularError <= target.record.radius);
@@ -699,7 +703,7 @@ export default function Home() {
         }
       }
     };
-    const onMove = (dx: number, dy: number) => {
+    const onMove = (dx: number, dy: number, timestamp: number) => {
       if (rt.mode !== 'running') return;
       if (rt.moveCount >= capacity) {
         setError('记录缓冲已满，运行已停止');
@@ -710,7 +714,7 @@ export default function Home() {
       rt.pitch = clamp(rt.pitch - dy * settings.degreesPerCount, -67.6, 67.6);
       rt.path += Math.hypot(dx, dy) * settings.degreesPerCount;
       const index = rt.moveCount++;
-      rt.moveT[index] = performance.now() - rt.start;
+      rt.moveT[index] = Math.max(0, timestamp - rt.start);
       rt.moveDx[index] = dx;
       rt.moveDy[index] = dy;
       rt.moveYaw[index] = rt.yaw;
@@ -718,10 +722,10 @@ export default function Home() {
       rt.moveTarget[index] = rt.active[0]?.record.id ?? -1;
       rt.inputCount += 1;
     };
-    const onDown = (button: number) => {
+    const onDown = (button: number, timestamp: number) => {
       if (button !== 0 || rt.mode !== 'running') return;
       if (selectedMode === 'tracking') rt.firing = true;
-      else shoot();
+      else shoot(timestamp);
     };
     const onUp = (button: number) => {
       if (button === 0) rt.firing = false;
@@ -740,10 +744,12 @@ export default function Home() {
       return;
     }
     rt.cleanup = input.release;
+    rt.inputDropped = input.dropped;
     rt.settings.inputBackend = {
       id: input.id,
       native: input.native,
       unadjusted: input.unadjusted,
+      dropped: 0,
     };
     rt.start = performance.now();
     rt.lastFrame = rt.start;
@@ -1373,10 +1379,14 @@ export default function Home() {
                   value={
                     run?.settings.inputBackend
                       ? `${run.settings.inputBackend.id} · ${
+                          run.settings.inputBackend.native
+                            ? 'native'
+                            : 'browser'
+                        } · ${
                           run.settings.inputBackend.unadjusted
                             ? 'unadjusted'
                             : 'adjusted fallback'
-                        }`
+                        } · dropped ${run.settings.inputBackend.dropped ?? 0}`
                       : `${INPUT_BACKEND.label} · raw requested`
                   }
                 />
