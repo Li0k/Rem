@@ -12,6 +12,7 @@ on:
     paths:
       - 'mouse-migration-lab/**'
       - '.github/workflows/mouse-migration-lab-windows.yml'
+      - '.gitattributes'
 
 permissions:
   contents: read
