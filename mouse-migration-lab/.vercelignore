@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+src-tauri
+tests
+.playwright-cli
+output
+*.tsbuildinfo
