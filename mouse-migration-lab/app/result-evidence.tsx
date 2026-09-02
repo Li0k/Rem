@@ -100,7 +100,7 @@ export default function ResultEvidence({
         <EvidenceCell
           label="Device"
           value={device?.name ?? 'Imported run'}
-          detail={`${device?.mouse ?? '—'} · ${device?.dpi ?? '—'} DPI`}
+          detail={`${device?.mouse ?? '—'} · ${device?.dpi ?? '—'} DPI${device?.measurement?.observedEventRateHz ? ` · observed ${device.measurement.observedEventRateHz.toFixed(0)} Hz` : ''}`}
         />
         <EvidenceCell
           label="Contract"
