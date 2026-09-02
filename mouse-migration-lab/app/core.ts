@@ -1,3 +1,5 @@
+import type { DeviceMeasurement } from './device-calibration';
+
 export type Target = {
   id: number;
   spawn: number;
@@ -45,6 +47,7 @@ export type DeviceProfile = {
   yawDegrees?: number;
   mappingSource?: 'community-measured' | 'custom';
   fov: number;
+  measurement?: DeviceMeasurement;
   createdAt: string;
   updatedAt: string;
 };

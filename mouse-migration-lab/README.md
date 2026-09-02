@@ -6,11 +6,36 @@ backend; web and macOS use browser Pointer Lock.
 
 ## Version and run data
 
-- Application/package/Tauri version: `0.3.0`
+- Application/package/Tauri version: `0.4.0`
 - Public run schema: `schema: 2`
-- Schema-2 runs written by the previous `0.1.0` and `0.2.0` builds are accepted
-  and normalized to `appVersion: 0.3.0` on import. Measurement arrays and
+- Schema-2 runs written by the previous `0.1.0`, `0.2.0`, and `0.3.0` builds
+  are accepted and normalized to `appVersion: 0.4.0` on import. Measurement arrays and
   metrics are not rewritten.
+
+## Device measurement boundary
+
+- Device profiles keep the DPI and polling rate configured by the user, as aim
+  trainers do; neither value is silently replaced by browser observations.
+- A five-second Pointer Lock / `WM_INPUT` capture records the backend, raw-input
+  status, movement sample count, device count, median/p95 event interval, and
+  observed event rate. Browser event coalescing means this is not claimed as the
+  mouse's configured polling rate.
+- DPI calibration requires the user to move a known physical distance. An
+  estimate is produced only when the backend confirms unadjusted relative
+  counts, and applying it to the configured profile is a separate action.
+- The latest measurement is stored locally with its source and timestamp and is
+  copied into each run snapshot. Generic mouse identity and configured DPI are
+  intentionally not queried through WebHID because browsers protect standard
+  mouse collections and vendor protocols are not portable.
+
+Reference behavior: [Aimlabs keeps CPI/DPI and sensitivity as explicit user
+configuration](https://aimlabs.com/articles/aimlabs/how-to-configure-and-convert-your-sensitivity-in-aimlabs/),
+[Roblox exposes relative mouse delta and sensitivity rather than hardware
+DPI](https://create.roblox.com/docs/reference/engine/classes/UserInputService/GetLastInputType),
+[Windows Raw Input exposes device metadata and sample-rate information where the
+device supports it](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-rid_device_info_mouse),
+and [Pointer Events allows browser event delivery to be coalesced and
+implementation-specific](https://www.w3.org/TR/pointerevents/).
 
 ## Windows build
 

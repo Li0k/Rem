@@ -26,7 +26,7 @@ import {
 const validRun = () => ({
   schema: 2,
   app: 'mouse-migration-lab',
-  appVersion: '0.3.0',
+  appVersion: '0.4.0',
   createdAt: '2026-09-01T00:00:00.000Z',
   userAgent: 'fixture',
   elapsedMs: 20,
@@ -261,11 +261,15 @@ describe('replay primitives', () => {
 
     const previousVersion = validRun();
     previousVersion.appVersion = '0.2.0';
-    expect(parseRun(previousVersion)?.appVersion).toBe('0.3.0');
+    expect(parseRun(previousVersion)?.appVersion).toBe('0.4.0');
 
     const legacyVersion = validRun();
     legacyVersion.appVersion = '0.1.0';
-    expect(parseRun(legacyVersion)?.appVersion).toBe('0.3.0');
+    expect(parseRun(legacyVersion)?.appVersion).toBe('0.4.0');
+
+    const latestPreviousVersion = validRun();
+    latestPreviousVersion.appVersion = '0.3.0';
+    expect(parseRun(latestPreviousVersion)?.appVersion).toBe('0.4.0');
 
     const dual = validRun();
     (dual.settings as Record<string, unknown>).timingModel = 'dual-v2';
@@ -311,6 +315,42 @@ describe('replay primitives', () => {
       pollingRate: 1000,
     };
     expect(parseRun(invalidDevice)).toBeNull();
+
+    const measuredDevice = validRun();
+    (measuredDevice.settings as Record<string, unknown>).device = {
+      id: 'mouse-1',
+      name: 'Desk profile',
+      mouse: 'Example mouse',
+      dpi: 800,
+      pollingRate: 1000,
+      measurement: {
+        measuredAt: '2026-09-02T00:00:00.000Z',
+        backend: 'windows-wm-input',
+        native: true,
+        unadjusted: true,
+        durationMs: 1000,
+        movementEvents: 1001,
+        deviceCount: 1,
+        observedEventRateHz: 1000,
+        intervalP50Ms: 1,
+        intervalP95Ms: 1.2,
+        intervalJitterRatio: 0.2,
+        quality: 'good',
+        calibrationDistanceCm: 10,
+        calibrationCounts: 3150,
+        estimatedDpi: 800,
+      },
+    };
+    expect(parseRun(measuredDevice)).not.toBeNull();
+    (
+      (
+        (measuredDevice.settings as Record<string, unknown>).device as Record<
+          string,
+          unknown
+        >
+      ).measurement as Record<string, unknown>
+    ).unadjusted = false;
+    expect(parseRun(measuredDevice)).toBeNull();
 
     const legacyBackend = validRun();
     (legacyBackend.settings as Record<string, unknown>).inputBackend = {

@@ -1,6 +1,6 @@
 [package]
 name = "mouse-migration-lab"
-version = "0.3.0"
+version = "0.4.0"
 description = "A local-first mouse migration instrument"
 authors = ["Mouse Migration Lab"]
 edition = "2021"

@@ -57,7 +57,7 @@ const makeRun = (
   return {
     schema: 2,
     app: 'mouse-migration-lab',
-    appVersion: '0.3.0',
+    appVersion: '0.4.0',
     createdAt: '2026-09-01T00:00:00.000Z',
     userAgent: 'diagnostics-test',
     elapsedMs: 5_000,

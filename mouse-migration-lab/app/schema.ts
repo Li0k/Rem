@@ -1,9 +1,13 @@
 import type { Target, TestMode } from './core';
+import {
+  isDeviceMeasurement,
+  type DeviceMeasurement,
+} from './device-calibration';
 import type { TimingModel } from './timing';
 
 export const RUN_SCHEMA = 2 as const;
-export const APP_VERSION = '0.3.0' as const;
-const LEGACY_APP_VERSIONS = new Set(['0.1.0', '0.2.0']);
+export const APP_VERSION = '0.4.0' as const;
+const LEGACY_APP_VERSIONS = new Set(['0.1.0', '0.2.0', '0.3.0']);
 
 export type DeviceProfileSnapshot = {
   id: string;
@@ -12,6 +16,7 @@ export type DeviceProfileSnapshot = {
   dpi: number;
   pollingRate: number;
   grip?: string;
+  measurement?: DeviceMeasurement;
 };
 
 export type Click = {
@@ -312,7 +317,9 @@ export function parseRun(value: unknown): RunData | null {
         (device.dpi as number) <= 0 ||
         !finite(device.pollingRate) ||
         (device.pollingRate as number) <= 0 ||
-        (device.grip !== undefined && typeof device.grip !== 'string')))
+        (device.grip !== undefined && typeof device.grip !== 'string') ||
+        (device.measurement !== undefined &&
+          !isDeviceMeasurement(device.measurement))))
   )
     return null;
   if (elapsedMs > settingDuration * 1000 + 1000) return null;

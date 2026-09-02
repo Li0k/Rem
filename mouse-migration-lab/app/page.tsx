@@ -65,6 +65,12 @@ import {
   type RunData,
 } from './schema';
 import {
+  isDeviceMeasurement,
+  summarizeDeviceMeasurement,
+  type DeviceMeasurement,
+  type MovementSample,
+} from './device-calibration';
+import {
   INPUT_BACKEND,
   type InputDiagnostics,
   type InputSession,
@@ -226,6 +232,13 @@ export default function Home() {
   const [dpi, setDpi] = useState('800');
   const [pollingRate, setPollingRate] = useState('1000');
   const [grip, setGrip] = useState('claw / relaxed');
+  const [deviceMeasurement, setDeviceMeasurement] =
+    useState<DeviceMeasurement | null>(null);
+  const [calibrationDistanceCm, setCalibrationDistanceCm] = useState('10');
+  const [calibrationKind, setCalibrationKind] = useState<'rate' | 'dpi' | null>(
+    null,
+  );
+  const [calibrationRemainingMs, setCalibrationRemainingMs] = useState(0);
   const [history, setHistory] = useState<RunData[]>([]);
   const [compareId, setCompareId] = useState('');
   const [metrics, setMetrics] = useState<Metrics>(freshMetrics);
@@ -237,6 +250,8 @@ export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const runtime = useRef<Runtime | null>(null);
+  const calibrationSession = useRef<InputSession | null>(null);
+  const calibrationGeneration = useRef(0);
   const replayRaf = useRef(0);
   const replayRenderer = useRef<{ destroy: () => void } | null>(null);
   const protocol = useMemo(() => protocolFor(selectedMode), [selectedMode]);
@@ -279,10 +294,15 @@ export default function Home() {
     try {
       const savedProfiles = JSON.parse(
         localStorage.getItem(PROFILE_STORAGE) ?? 'null',
-      ) as DeviceProfile[] | null;
+      ) as unknown;
       const nextProfiles =
         Array.isArray(savedProfiles) && savedProfiles.length
-          ? savedProfiles
+          ? (savedProfiles as DeviceProfile[]).map((profile) => ({
+              ...profile,
+              measurement: isDeviceMeasurement(profile.measurement)
+                ? profile.measurement
+                : undefined,
+            }))
           : [defaultProfile()];
       setProfiles(nextProfiles);
       const first = nextProfiles[0];
@@ -292,6 +312,7 @@ export default function Home() {
       setDpi(String(first.dpi));
       setPollingRate(String(first.pollingRate));
       setGrip(first.grip ?? '');
+      setDeviceMeasurement(first.measurement ?? null);
       setSensitivity(String(first.sensitivity));
       setValorantYaw(String(first.yawDegrees ?? 0.07));
       setMappingSource(first.mappingSource ?? 'community-measured');
@@ -329,6 +350,7 @@ export default function Home() {
       yawDegrees,
       mappingSource,
       fov: 103,
+      measurement: deviceMeasurement ?? activeProfile?.measurement,
       createdAt: activeProfile?.createdAt ?? now,
       updatedAt: now,
     };
@@ -350,6 +372,7 @@ export default function Home() {
     setDpi(String(next.dpi));
     setPollingRate(String(next.pollingRate));
     setGrip(next.grip ?? '');
+    setDeviceMeasurement(next.measurement ?? null);
     setSensitivity(String(next.sensitivity));
     setValorantYaw(String(next.yawDegrees ?? 0.07));
     setMappingSource(next.mappingSource ?? 'community-measured');
@@ -362,10 +385,133 @@ export default function Home() {
     setDpi('800');
     setPollingRate('1000');
     setGrip('');
+    setDeviceMeasurement(null);
     setSensitivity('0.32');
     setValorantYaw('0.07');
     setMappingSource('community-measured');
     setError('已创建空白设备配置，填写后保存');
+  };
+
+  const measureDevice = async (kind: 'rate' | 'dpi') => {
+    if (calibrationKind || runtime.current) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (!activeProfile) {
+      setError('请先保存设备配置，再进行检测');
+      return;
+    }
+    const requestedDistance = Number(calibrationDistanceCm);
+    if (
+      kind === 'dpi' &&
+      (!Number.isFinite(requestedDistance) ||
+        requestedDistance < 2 ||
+        requestedDistance > 100)
+    ) {
+      setError('DPI 校准距离必须在 2–100 cm 之间');
+      return;
+    }
+    const generation = ++calibrationGeneration.current;
+    const samples: MovementSample[] = [];
+    let endEarly: (() => void) | null = null;
+    const earlyEnd = new Promise<void>((resolve) => {
+      endEarly = resolve;
+    });
+    setCalibrationKind(kind);
+    setCalibrationRemainingMs(5_000);
+    setError(
+      kind === 'dpi'
+        ? `锁定后沿直线移动 ${calibrationDistanceCm || '10'} cm；5 秒后自动结束`
+        : '锁定后持续快速移动鼠标；5 秒后自动结束',
+    );
+    let countdown = 0;
+    let captureTimeout = 0;
+    try {
+      const input = await INPUT_BACKEND.acquire(canvas, {
+        move: (dx, dy, timestamp) => samples.push({ dx, dy, timestamp }),
+        buttonDown: () => {},
+        buttonUp: () => {},
+        lost: () => endEarly?.(),
+      });
+      if (!input) {
+        setError(`无法获取 ${INPUT_BACKEND.label}，检测未开始`);
+        return;
+      }
+      calibrationSession.current = input;
+      const startedAt = performance.now();
+      countdown = window.setInterval(
+        () =>
+          setCalibrationRemainingMs(
+            Math.max(0, 5_000 - (performance.now() - startedAt)),
+          ),
+        100,
+      );
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          captureTimeout = window.setTimeout(resolve, 5_000);
+        }),
+        earlyEnd,
+      ]);
+      const diagnostics = await input.finish();
+      calibrationSession.current = null;
+      if (generation !== calibrationGeneration.current) return;
+      const distance = kind === 'dpi' ? requestedDistance : null;
+      const measurement = summarizeDeviceMeasurement(
+        samples,
+        diagnostics,
+        distance,
+      );
+      setDeviceMeasurement(measurement);
+      setInputDiagnostics(diagnostics);
+      setProfiles((previous) =>
+        previous.map((profile) =>
+          profile.id === profileId
+            ? {
+                ...profile,
+                measurement,
+                updatedAt: measurement.measuredAt,
+              }
+            : profile,
+        ),
+      );
+      if (measurement.quality === 'insufficient')
+        setError('样本不足：请在检测期间持续移动鼠标后重试');
+      else if (kind === 'dpi' && measurement.estimatedDpi === null)
+        setError('当前输入不是未加速原始计数；已保存事件率，但不推断 DPI');
+      else
+        setError(
+          `检测已保存：${measurement.observedEventRateHz?.toFixed(0) ?? '—'} observed Hz${measurement.estimatedDpi ? ` · ${measurement.estimatedDpi} estimated DPI` : ''}`,
+        );
+    } catch (inputError) {
+      setError(`设备检测失败：${String(inputError)}`);
+    } finally {
+      window.clearInterval(countdown);
+      window.clearTimeout(captureTimeout);
+      calibrationSession.current?.release();
+      calibrationSession.current = null;
+      if (generation === calibrationGeneration.current) {
+        setCalibrationKind(null);
+        setCalibrationRemainingMs(0);
+      }
+    }
+  };
+
+  const applyEstimatedDpi = () => {
+    if (!deviceMeasurement?.estimatedDpi) return;
+    const nextDpi = clamp(deviceMeasurement.estimatedDpi, 100, 50_000);
+    setDpi(String(nextDpi));
+    setProfiles((previous) =>
+      previous.map((profile) =>
+        profile.id === profileId
+          ? {
+              ...profile,
+              dpi: nextDpi,
+              measurement: deviceMeasurement,
+              updatedAt: new Date().toISOString(),
+            }
+          : profile,
+      ),
+    );
+    setError(`已应用并保存 ${nextDpi} estimated DPI`);
   };
 
   useEffect(() => {
@@ -535,6 +681,7 @@ export default function Home() {
             dpi: activeProfile.dpi,
             pollingRate: activeProfile.pollingRate,
             grip: activeProfile.grip,
+            measurement: activeProfile.measurement,
           }
         : {
             id: profileId,
@@ -543,6 +690,7 @@ export default function Home() {
             dpi: Number(dpi) || 800,
             pollingRate: Number(pollingRate) || 1000,
             grip,
+            measurement: deviceMeasurement ?? undefined,
           },
     };
     const random = mulberry32(settings.seed);
@@ -1017,6 +1165,7 @@ export default function Home() {
     rt.raf = requestAnimationFrame(frame);
   }, [
     activeProfile,
+    deviceMeasurement,
     dpi,
     duration,
     grip,
@@ -1034,6 +1183,9 @@ export default function Home() {
 
   useEffect(
     () => () => {
+      calibrationGeneration.current += 1;
+      calibrationSession.current?.release();
+      calibrationSession.current = null;
       const rt = runtime.current;
       if (rt?.mode === 'running') void stop();
       else if (rt) {
@@ -1366,6 +1518,128 @@ export default function Home() {
                       disabled={lockedView}
                     />
                   </Field>
+                </div>
+
+                <div className="border-2 border-plum/30 bg-white/65 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-pixel text-[7px] uppercase tracking-[0.08em] text-plum">
+                      Input measurement
+                    </span>
+                    <span className="font-mono text-[8px] text-muted-foreground">
+                      configured ≠ observed
+                    </span>
+                  </div>
+                  <p className="mt-2 font-mono text-[8px] leading-relaxed text-muted-foreground">
+                    与 Aimlabs / FPS 输入链路一致：DPI 与设备 Hz
+                    保留为硬件配置；这里测量原始输入可见的事件率，并可用已知物理距离估算
+                    DPI。
+                  </p>
+                  <div className="mt-3 grid grid-cols-[88px_minmax(0,1fr)] gap-2">
+                    <Input
+                      className={INPUT_CLASS}
+                      type="number"
+                      min="2"
+                      max="100"
+                      step="0.5"
+                      aria-label="DPI 校准移动距离 cm"
+                      value={calibrationDistanceCm}
+                      onChange={(event) =>
+                        setCalibrationDistanceCm(event.target.value)
+                      }
+                      disabled={lockedView || calibrationKind !== null}
+                    />
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        variant="outline"
+                        className="rounded-none border-2 border-plum/40 bg-white px-2 font-mono text-[8px] text-plum hover:bg-pink-soft"
+                        type="button"
+                        disabled={lockedView || calibrationKind !== null}
+                        onClick={() => void measureDevice('rate')}
+                      >
+                        {calibrationKind === 'rate' ? '检测中…' : '测事件率'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="rounded-none border-2 border-plum/40 bg-white px-2 font-mono text-[8px] text-plum hover:bg-pink-soft"
+                        type="button"
+                        disabled={lockedView || calibrationKind !== null}
+                        onClick={() => void measureDevice('dpi')}
+                      >
+                        {calibrationKind === 'dpi' ? '校准中…' : '校准 DPI'}
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="mt-1 font-mono text-[7px] text-muted-foreground">
+                    左侧为直线移动距离（cm）；只测事件率时无需按该距离移动。
+                  </div>
+                  {calibrationKind && (
+                    <div className="mt-3">
+                      <Progress
+                        value={((5_000 - calibrationRemainingMs) / 5_000) * 100}
+                      />
+                      <div className="mt-1 text-center font-mono text-[8px] text-plum">
+                        {(calibrationRemainingMs / 1_000).toFixed(1)}s ·
+                        持续移动鼠标
+                      </div>
+                    </div>
+                  )}
+                  {deviceMeasurement && !calibrationKind && (
+                    <div className="mt-3 border-t border-plum/15 pt-3 font-mono text-[8px]">
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                        <span className="text-muted-foreground">
+                          Observed rate
+                        </span>
+                        <strong className="text-right text-plum">
+                          {deviceMeasurement.observedEventRateHz?.toFixed(0) ??
+                            '—'}{' '}
+                          Hz
+                        </strong>
+                        <span className="text-muted-foreground">
+                          Interval p50 / p95
+                        </span>
+                        <strong className="text-right text-plum">
+                          {deviceMeasurement.intervalP50Ms?.toFixed(2) ?? '—'} /{' '}
+                          {deviceMeasurement.intervalP95Ms?.toFixed(2) ?? '—'}{' '}
+                          ms
+                        </strong>
+                        <span className="text-muted-foreground">Backend</span>
+                        <strong className="truncate text-right text-plum">
+                          {deviceMeasurement.backend}
+                        </strong>
+                        <span className="text-muted-foreground">
+                          Raw / quality
+                        </span>
+                        <strong className="text-right text-plum">
+                          {deviceMeasurement.unadjusted ? 'yes' : 'no'} /{' '}
+                          {deviceMeasurement.quality}
+                        </strong>
+                        <span className="text-muted-foreground">
+                          Estimated DPI
+                        </span>
+                        <strong className="text-right text-plum">
+                          {deviceMeasurement.estimatedDpi ?? '—'}
+                        </strong>
+                      </div>
+                      {deviceMeasurement.estimatedDpi && (
+                        <Button
+                          variant="outline"
+                          className="mt-2 h-8 w-full rounded-none border-2 border-plum/40 bg-white font-mono text-[8px] text-plum hover:bg-pink-soft"
+                          type="button"
+                          onClick={applyEstimatedDpi}
+                          disabled={lockedView}
+                        >
+                          应用 {deviceMeasurement.estimatedDpi} estimated DPI
+                        </Button>
+                      )}
+                      <div className="mt-2 text-[7px] leading-relaxed text-muted-foreground">
+                        {new Date(deviceMeasurement.measuredAt).toLocaleString(
+                          'zh-CN',
+                        )}{' '}
+                        · {deviceMeasurement.movementEvents} movement events ·{' '}
+                        {deviceMeasurement.deviceCount || 'unknown'} device(s)
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <Field label="握法备注" hint="optional" htmlFor="grip">
